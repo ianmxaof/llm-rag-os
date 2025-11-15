@@ -1,0 +1,20 @@
+{
+  "directories": [
+    {
+      "name": "Obsidian Vault",
+      "path": "C:\\Users\\ianmp\\Documents\\Obsidian\\Vault (The Singularity Ride 2.0)\\The Singularity Ride 2.0",
+      "read_only": false
+    },
+    {
+      "name": "Work Secure Docs",
+      "path": "C:\\Users\\ianmp\\Work",
+      "read_only": true
+    },
+    {
+      "name": "ChatGPT Exports",
+      "path": "C:\\Users\\ianmp\\Documents\\ChatGPT Exports",
+      "read_only": false
+    }
+  ]
+}
+

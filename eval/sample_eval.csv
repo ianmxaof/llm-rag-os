@@ -1,0 +1,4 @@
+question,answer,context
+"What is the purpose of this knowledge base?","It powers a personal RAG assistant that indexes notes, transcripts, and project documents.","knowledge\\intro.md"
+"Where are ingest scripts stored?","They live under the scripts directory of the llm-rag project.","scripts\\ingest.py"
+

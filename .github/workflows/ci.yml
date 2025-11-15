@@ -1,0 +1,119 @@
+name: CI/CD - v0.1 Smoke Test
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      ollama:
+        image: ollama/ollama:latest
+        ports:
+          - 11434:11434
+        options: >-
+          --health-cmd "curl -f http://localhost:11434/api/tags || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Pull Ollama models
+        run: |
+          ollama pull nomic-embed-text || echo "Model pull failed, will test with available models"
+
+      - name: Create test data directories
+        run: |
+          mkdir -p knowledge/inbox knowledge/processed knowledge/archived chroma
+
+      - name: Wait for Ollama to be ready
+        run: |
+          for i in {1..30}; do
+            if curl -f http://localhost:11434/api/tags; then
+              echo "Ollama is ready"
+              break
+            fi
+            echo "Waiting for Ollama... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run smoke tests
+        env:
+          API_BASE: http://localhost:8000
+          STREAMLIT_BASE: http://localhost:8501
+          OLLAMA_API: http://localhost:11434/api
+        run: |
+          # Start FastAPI in background
+          uvicorn backend.app:app --host 0.0.0.0 --port 8000 &
+          FASTAPI_PID=$!
+          
+          # Wait for FastAPI to start
+          sleep 5
+          
+          # Run tests
+          python tests/smoke_test.py || EXIT_CODE=$?
+          
+          # Cleanup
+          kill $FASTAPI_PID 2>/dev/null || true
+          
+          exit ${EXIT_CODE:-0}
+
+      - name: Build Docker image
+        run: |
+          docker build -t rag-os:v0.1 .
+
+      - name: Test Docker container
+        run: |
+          # Start container in background
+          docker run -d \
+            --name rag-test \
+            -p 8001:8000 \
+            -p 8502:8501 \
+            -p 11435:11434 \
+            rag-os:v0.1
+          
+          # Wait for services to start
+          echo "Waiting for services to start..."
+          sleep 30
+          
+          # Test health endpoint
+          for i in {1..10}; do
+            if curl -f http://localhost:8001/health; then
+              echo "FastAPI is responding"
+              break
+            fi
+            echo "Waiting for FastAPI... ($i/10)"
+            sleep 3
+          done
+          
+          # Test Streamlit
+          curl -f http://localhost:8502 || echo "Streamlit check failed"
+          
+          # Cleanup
+          docker stop rag-test
+          docker rm rag-test
+
+      - name: Test summary
+        if: always()
+        run: |
+          echo "CI/CD pipeline completed"
+          echo "Check logs above for test results"
+

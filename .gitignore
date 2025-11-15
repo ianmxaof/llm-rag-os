@@ -1,0 +1,109 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Environment variables
+.env
+.env.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+db.sqlite
+
+# Vector stores
+chroma/
+vector_store/
+*.chroma
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Knowledge base (user data - exclude from repository)
+knowledge/
+data/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# LLM / RAG heavy directories
+vectorstore/
+datasets/
+embeddings/
+cache/
+*.cache
+
+# Model weights
+*.gguf
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# LM Studio
+lmstudio/
+models/
+stubs/
+
+# Archives and large files
+*.zip
+*.tar
+*.tar.gz
+*.pdf
+*.epub
+
+# Jupyter cruft
+.ipynb_checkpoints/
+
