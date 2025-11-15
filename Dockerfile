@@ -24,5 +24,5 @@ RUN mkdir -p knowledge/inbox knowledge/processed knowledge/archived chroma
 EXPOSE 8501 8000 11434
 
 # Start Ollama service, FastAPI, and Streamlit
-CMD sh -c "ollama serve & sleep 5 && uvicorn backend.app:app --host 0.0.0.0 --port 8000 & streamlit run streamlit_app.py --server.port=8501 --server.address=0.0.0.0"
+CMD sh -c "ollama serve & sleep 5 && uvicorn backend.app:app --host 0.0.0.0 --port 8000 & streamlit run src/app/streamlit_app.py --server.port=8501 --server.address=0.0.0.0"
 

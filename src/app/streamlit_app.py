@@ -18,7 +18,7 @@ st.caption("Local RAG pipeline with Ollama integration")
 # Check backend availability
 backend_available = check_backend_available()
 if not backend_available:
-    st.warning("⚠️ FastAPI backend is not running. Start it with: `python -m backend.app` or `run_backend.bat`")
+    st.warning("⚠️ FastAPI backend is not running. Start it with: `python -m backend.app` or `scripts/run_backend.bat`")
 
 # Create tabs
 tabs = st.tabs(["Dashboard", "Chat", "Library", "Ingest", "Visualize", "Prompts"])

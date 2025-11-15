@@ -58,10 +58,10 @@ A private, local RAG (Retrieval-Augmented Generation) system powered by Ollama. 
 5. **Start the backend**
    ```bash
    # Windows
-   run_backend.bat
+   scripts\run_backend.bat
    
    # Linux/macOS
-   ./run_backend.sh
+   ./scripts/run_backend.sh
    
    # Or manually
    uvicorn backend.app:app --reload
@@ -69,7 +69,7 @@ A private, local RAG (Retrieval-Augmented Generation) system powered by Ollama. 
 
 6. **Start the Streamlit GUI** (in a new terminal)
    ```bash
-   streamlit run streamlit_app.py
+   streamlit run src/app/streamlit_app.py
    ```
 
 7. **Open your browser**
@@ -160,7 +160,10 @@ llm-rag-os/
 │   ├── processed/      # Processed files
 │   └── archived/      # Archived files
 ├── chroma/             # Vector store (gitignored)
-├── streamlit_app.py    # Streamlit GUI
+├── src/
+│   ├── app/
+│   │   └── streamlit_app.py  # Streamlit GUI
+│   └── ...                   # Other source modules
 ├── Dockerfile          # Docker configuration
 ├── docker-compose.yml  # Docker Compose config
 └── requirements.txt    # Python dependencies
@@ -244,8 +247,8 @@ ollama pull nomic-embed-text
 ### Port already in use
 
 Change ports in:
-- `run_backend.bat` / `run_backend.sh` (FastAPI)
-- `streamlit_app.py` (Streamlit)
+- `scripts/run_backend.bat` / `scripts/run_backend.sh` (FastAPI)
+- `src/app/streamlit_app.py` (Streamlit)
 
 ## Roadmap
 
