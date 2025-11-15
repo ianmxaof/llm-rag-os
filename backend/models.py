@@ -94,7 +94,7 @@ class Prompt(Base):
 
 def init_db():
     """Initialize database tables."""
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine, checkfirst=True)
     print(f"[INFO] Database initialized at {DB_PATH}")
 
 
