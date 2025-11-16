@@ -32,9 +32,13 @@ def get_llm_status() -> Dict:
 def get_ollama_status() -> Dict:
     """Get Ollama status."""
     try:
-        response = requests.get(f"{API_BASE}/ollama/status", timeout=2)
+        response = requests.get(f"{API_BASE}/ollama/status", timeout=5)
         response.raise_for_status()
         return response.json()
+    except requests.exceptions.Timeout:
+        return {"available": False, "error": "Backend request timed out. Make sure FastAPI backend is running."}
+    except requests.exceptions.ConnectionError:
+        return {"available": False, "error": "Cannot connect to FastAPI backend. Start it with: python -m backend.app"}
     except Exception as e:
         return {"available": False, "error": str(e)}
 
