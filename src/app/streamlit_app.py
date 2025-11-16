@@ -193,26 +193,58 @@ with tabs[3]:
                 st.markdown(f"**Contents of:** `{st.session_state.current_dir}`")
                 try:
                     items = sorted(os.listdir(st.session_state.current_dir))
+                    inbox_path = Path("knowledge/inbox").resolve()
+                    current_path = Path(st.session_state.current_dir).resolve()
+                    
                     for item in items:
                         item_path = os.path.join(st.session_state.current_dir, item)
-                        if os.path.isfile(item_path) and item.endswith(".md"):
-                            col_file, col_copy = st.columns([3, 1])
-                            with col_file:
-                                st.text(f"📄 {item}")
-                            with col_copy:
-                                if st.button(f"Copy → inbox", key=f"copy_{item_path}"):
-                                    import shutil
-                                    target = Path("knowledge/inbox") / item
-                                    target.parent.mkdir(parents=True, exist_ok=True)
-                                    shutil.copy2(item_path, str(target))
-                                    st.success(f"✅ Copied to inbox: {item}")
+                        try:
+                            if os.path.isfile(item_path) and item.endswith(".md"):
+                                col_file, col_copy = st.columns([3, 1])
+                                with col_file:
+                                    # Check if file is already in inbox
+                                    item_resolved = Path(item_path).resolve()
+                                    if item_resolved.parent == inbox_path:
+                                        st.text(f"📄 {item} (already in inbox)")
+                                    else:
+                                        st.text(f"📄 {item}")
+                                with col_copy:
+                                    # Don't show copy button if already in inbox
+                                    if item_resolved.parent != inbox_path:
+                                        if st.button(f"Copy → inbox", key=f"copy_{item_path}"):
+                                            try:
+                                                target = inbox_path / item
+                                                target.parent.mkdir(parents=True, exist_ok=True)
+                                                
+                                                # Handle duplicate filenames
+                                                counter = 1
+                                                while target.exists():
+                                                    name_parts = item.rsplit(".", 1)
+                                                    if len(name_parts) == 2:
+                                                        new_name = f"{name_parts[0]}_{counter}.{name_parts[1]}"
+                                                    else:
+                                                        new_name = f"{item}_{counter}"
+                                                    target = inbox_path / new_name
+                                                    counter += 1
+                                                
+                                                shutil.copy2(item_path, str(target))
+                                                st.success(f"✅ Copied to inbox: {target.name}")
+                                                st.rerun()
+                                            except PermissionError as pe:
+                                                st.error(f"Permission denied: {pe}")
+                                            except Exception as e:
+                                                st.error(f"Error copying file: {e}")
+                            elif os.path.isdir(item_path):
+                                if st.button(f"📁 {item}/", key=f"dir_{item_path}"):
+                                    st.session_state.current_dir = item_path
                                     st.rerun()
-                        elif os.path.isdir(item_path):
-                            if st.button(f"📁 {item}/", key=f"dir_{item_path}"):
-                                st.session_state.current_dir = item_path
-                                st.rerun()
-                except PermissionError:
-                    st.error("Permission denied accessing this directory")
+                        except PermissionError:
+                            # Skip files/dirs we can't access
+                            continue
+                except PermissionError as pe:
+                    st.error(f"Permission denied accessing directory: {pe}")
+                except Exception as e:
+                    st.error(f"Error listing directory: {e}")
             st.markdown("---")
         
         # Manual Path Input + Embed
