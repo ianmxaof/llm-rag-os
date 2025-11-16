@@ -34,6 +34,7 @@ class Config(BaseModel):
     INBOX: Path = KNOWLEDGE_DIR / "inbox"
     PROCESSED: Path = KNOWLEDGE_DIR / "processed"
     ARCHIVE: Path = KNOWLEDGE_DIR / "archived"
+    ERROR_DIR: Path = KNOWLEDGE_DIR / "error"
     
     # Vector store path
     VECTOR_DIR: Path = ROOT / "chroma"
@@ -84,7 +85,7 @@ class Config(BaseModel):
         "hacking", "networking", "programming", "ai", "linux", "windows", "other"
     ]
     
-    @validator("INBOX", "PROCESSED", "ARCHIVE", "VECTOR_DIR", "KNOWLEDGE_DIR")
+    @validator("INBOX", "PROCESSED", "ARCHIVE", "ERROR_DIR", "VECTOR_DIR", "KNOWLEDGE_DIR")
     def ensure_directories_exist(cls, v):
         """Ensure directories exist, create if missing."""
         v.mkdir(parents=True, exist_ok=True)
@@ -133,6 +134,7 @@ else:
         'INBOX': Path(__file__).resolve().parent.parent / "knowledge" / "inbox",
         'PROCESSED': Path(__file__).resolve().parent.parent / "knowledge" / "processed",
         'ARCHIVE': Path(__file__).resolve().parent.parent / "knowledge" / "archived",
+        'ERROR_DIR': Path(__file__).resolve().parent.parent / "knowledge" / "error",
         'VECTOR_DIR': Path(__file__).resolve().parent.parent / "chroma",
         'CONFIG_PATH': Path(__file__).resolve().parent.parent / "config" / "sources.json",
         'EMBED_MODEL': os.getenv("EMBED_MODEL_NAME", "BAAI/bge-small-en-v1.5"),

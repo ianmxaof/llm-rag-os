@@ -59,7 +59,7 @@ class InboxHandler(FileSystemEventHandler):
                     
                     # Move file to processed directory
                     try:
-                        processed_dir = config.PROCESSED_DIR
+                        processed_dir = config.PROCESSED
                         processed_dir.mkdir(parents=True, exist_ok=True)
                         
                         filename = os.path.basename(path)
@@ -82,18 +82,54 @@ class InboxHandler(FileSystemEventHandler):
                         logger.error(f"Failed to move file to processed: {e}")
                 else:
                     logger.error(f"Ingestion failed: {result.get('message', 'Unknown error')}")
+                    # Move failed file to error directory
+                    try:
+                        error_dir = config.ERROR_DIR
+                        error_dir.mkdir(parents=True, exist_ok=True)
+                        error_target = error_dir / os.path.basename(path)
+                        shutil.move(path, str(error_target))
+                        logger.info(f"Moved failed file to error: {error_target}")
+                    except Exception as e:
+                        logger.error(f"Failed to move file to error: {e}")
             else:
                 logger.error(f"API request failed: {response.status_code} - {response.text}")
+                # Move failed file to error directory
+                try:
+                    error_dir = config.ERROR_DIR
+                    error_dir.mkdir(parents=True, exist_ok=True)
+                    error_target = error_dir / os.path.basename(path)
+                    shutil.move(path, str(error_target))
+                    logger.info(f"Moved failed file to error: {error_target}")
+                except Exception as e:
+                    logger.error(f"Failed to move file to error: {e}")
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"Error calling ingestion API: {e}")
+            # Move failed file to error directory
+            try:
+                error_dir = config.ERROR_DIR
+                error_dir.mkdir(parents=True, exist_ok=True)
+                error_target = error_dir / os.path.basename(path)
+                shutil.move(path, str(error_target))
+                logger.info(f"Moved failed file to error: {error_target}")
+            except Exception as move_error:
+                logger.error(f"Failed to move file to error: {move_error}")
         except Exception as e:
             logger.error(f"Unexpected error processing file {path}: {e}")
+            # Move failed file to error directory
+            try:
+                error_dir = config.ERROR_DIR
+                error_dir.mkdir(parents=True, exist_ok=True)
+                error_target = error_dir / os.path.basename(path)
+                shutil.move(path, str(error_target))
+                logger.info(f"Moved failed file to error: {error_target}")
+            except Exception as move_error:
+                logger.error(f"Failed to move file to error: {move_error}")
 
 
 def main():
     """Start watching the inbox directory."""
-    inbox_dir = config.INBOX_DIR
+    inbox_dir = config.INBOX
     
     # Ensure inbox directory exists
     inbox_dir.mkdir(parents=True, exist_ok=True)
@@ -102,7 +138,8 @@ def main():
     
     event_handler = InboxHandler()
     observer = Observer()
-    observer.schedule(event_handler, str(inbox_dir), recursive=False)
+    # Watch recursively to support Obsidian vaults (e.g., inbox/MyVault/)
+    observer.schedule(event_handler, str(inbox_dir), recursive=True)
     observer.start()
     
     try:

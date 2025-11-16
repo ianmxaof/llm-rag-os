@@ -17,6 +17,8 @@ from src.api_client import (
     run_ingestion, ingest_file, get_umap_coords, get_corpus_stats,
     get_graph_nodes, get_graph_edges
 )
+from scripts.config import config
+import psutil
 
 st.set_page_config(page_title="Powercore RAG Control Panel", layout="wide")
 
@@ -159,115 +161,179 @@ with tabs[3]:
     if backend_available:
         st.subheader("Single File Ingestion (Ollama)")
         
-        # File Browser Section
-        st.markdown("#### Browse Local Files")
-        default_dir = str(Path("knowledge/inbox").resolve())
+        # Helper function to trigger ingestion with progress tracking
+        def trigger_ingest(file_path: Path):
+            """Trigger ingestion with progress feedback."""
+            if "ingest_status" in st.session_state and st.session_state.ingest_status.get("stage") in ["loading", "embedding", "unloading"]:
+                st.warning("Another ingestion in progress. Please wait.")
+                return
+            
+            # Initialize status tracking
+            st.session_state.ingest_status = {
+                "stage": "loading",
+                "model": config.OLLAMA_EMBED_MODEL,
+                "file": file_path.name,
+                "ram_before": psutil.Process().memory_info().rss
+            }
+            
+            try:
+                # Trigger ingestion via API
+                result = ingest_file(str(file_path.resolve()))
+                
+                if result.get("success"):
+                    # Get RAM after ingestion
+                    ram_after = psutil.Process().memory_info().rss
+                    ram_freed = st.session_state.ingest_status["ram_before"] - ram_after
+                    
+                    st.session_state.ingest_status = {
+                        "stage": "done",
+                        "file": file_path.name,
+                        "ram_before": st.session_state.ingest_status["ram_before"],
+                        "ram_after": ram_after,
+                        "ram_freed": ram_freed
+                    }
+                else:
+                    st.session_state.ingest_status = {
+                        "stage": "error",
+                        "error": result.get("message", "Unknown error"),
+                        "file": file_path.name
+                    }
+            except Exception as e:
+                st.session_state.ingest_status = {
+                    "stage": "error",
+                    "error": str(e),
+                    "file": file_path.name
+                }
         
-        if "current_dir" not in st.session_state:
-            st.session_state.current_dir = default_dir
-        if "show_browser" not in st.session_state:
-            st.session_state.show_browser = False
+        # --- Native File Picker (Drag & Drop or Click) ---
+        uploaded_file = st.file_uploader(
+            "Select .md file to ingest",
+            type=["md"],
+            help="Click to browse or drag & drop a Markdown file from anywhere on your PC",
+            label_visibility="visible"
+        )
         
-        col_browse, col_close = st.columns([3, 1])
-        with col_browse:
-            if st.button("📁 Browse Files", key="browse_btn"):
-                st.session_state.show_browser = True
-                st.session_state.current_dir = default_dir
+        # --- Handle uploaded file ---
+        if uploaded_file is not None:
+            inbox_path = Path(config.INBOX)
+            inbox_path.mkdir(parents=True, exist_ok=True)
+            
+            save_path = inbox_path / uploaded_file.name
+            
+            # Handle duplicate filenames
+            counter = 1
+            while save_path.exists():
+                name_parts = uploaded_file.name.rsplit(".", 1)
+                if len(name_parts) == 2:
+                    new_name = f"{name_parts[0]}_{counter}.{name_parts[1]}"
+                else:
+                    new_name = f"{uploaded_file.name}_{counter}"
+                save_path = inbox_path / new_name
+                counter += 1
+            
+            # Save file to inbox
+            with open(save_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            st.success(f"✅ Saved: `{save_path.name}` → inbox/")
+            
+            # Show preview
+            with st.expander(f"📄 Preview: {save_path.name}", expanded=True):
+                try:
+                    content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+                    preview_length = 1500
+                    if len(content) > preview_length:
+                        st.code(content[:preview_length] + "\n\n... [truncated]", language="markdown")
+                    else:
+                        st.code(content, language="markdown")
+                except Exception as e:
+                    st.error(f"Could not preview file: {e}")
+            
+            # Show file metadata
+            file_size = save_path.stat().st_size
+            size_str = f"{file_size/1024:.1f} KB" if file_size < 1024*1024 else f"{file_size/(1024*1024):.1f} MB"
+            st.caption(f"Size: {size_str} • Last modified: {time.strftime('%m/%d/%Y %I:%M %p', time.localtime(save_path.stat().st_mtime))}")
+            
+            # Ingest button
+            if st.button(f"🚀 Ingest `{save_path.name}` Now", type="primary", use_container_width=True):
+                trigger_ingest(save_path)
                 st.rerun()
         
-        if st.session_state.show_browser:
-            st.markdown("---")
-            col_dir, col_go, col_close_btn = st.columns([4, 1, 1])
-            with col_dir:
-                new_dir = st.text_input("Directory:", value=st.session_state.current_dir, key="dir_input")
-            with col_go:
-                if st.button("Go"):
-                    if os.path.isdir(new_dir):
-                        st.session_state.current_dir = new_dir
-                        st.rerun()
-            with col_close_btn:
-                if st.button("Close"):
-                    st.session_state.show_browser = False
-                    st.rerun()
-            
-            if os.path.isdir(st.session_state.current_dir):
-                st.markdown(f"**Contents of:** `{st.session_state.current_dir}`")
-                try:
-                    items = sorted(os.listdir(st.session_state.current_dir))
-                    inbox_path = Path("knowledge/inbox").resolve()
-                    current_path = Path(st.session_state.current_dir).resolve()
-                    
-                    for item in items:
-                        item_path = os.path.join(st.session_state.current_dir, item)
-                        try:
-                            if os.path.isfile(item_path) and item.endswith(".md"):
-                                col_file, col_copy = st.columns([3, 1])
-                                with col_file:
-                                    # Check if file is already in inbox
-                                    item_resolved = Path(item_path).resolve()
-                                    if item_resolved.parent == inbox_path:
-                                        st.text(f"📄 {item} (already in inbox)")
-                                    else:
-                                        st.text(f"📄 {item}")
-                                with col_copy:
-                                    # Don't show copy button if already in inbox
-                                    if item_resolved.parent != inbox_path:
-                                        if st.button(f"Copy → inbox", key=f"copy_{item_path}"):
-                                            try:
-                                                target = inbox_path / item
-                                                target.parent.mkdir(parents=True, exist_ok=True)
-                                                
-                                                # Handle duplicate filenames
-                                                counter = 1
-                                                while target.exists():
-                                                    name_parts = item.rsplit(".", 1)
-                                                    if len(name_parts) == 2:
-                                                        new_name = f"{name_parts[0]}_{counter}.{name_parts[1]}"
-                                                    else:
-                                                        new_name = f"{item}_{counter}"
-                                                    target = inbox_path / new_name
-                                                    counter += 1
-                                                
-                                                shutil.copy2(item_path, str(target))
-                                                st.success(f"✅ Copied to inbox: {target.name}")
-                                                st.rerun()
-                                            except PermissionError as pe:
-                                                st.error(f"Permission denied: {pe}")
-                                            except Exception as e:
-                                                st.error(f"Error copying file: {e}")
-                            elif os.path.isdir(item_path):
-                                if st.button(f"📁 {item}/", key=f"dir_{item_path}"):
-                                    st.session_state.current_dir = item_path
-                                    st.rerun()
-                        except PermissionError:
-                            # Skip files/dirs we can't access
-                            continue
-                except PermissionError as pe:
-                    st.error(f"Permission denied accessing directory: {pe}")
-                except Exception as e:
-                    st.error(f"Error listing directory: {e}")
-            st.markdown("---")
+        st.markdown("---")
         
-        # Manual Path Input + Embed
-        st.markdown("#### Manual File Path")
+        # --- Browse Existing Files in Inbox ---
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown("#### Browse Existing Files in inbox/")
+        with col2:
+            if st.button("🔄 Refresh inbox", use_container_width=True):
+                st.rerun()
+        
+        inbox_path = Path(config.INBOX)
+        inbox_files = sorted(
+            inbox_path.glob("*.md"),
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        ) if inbox_path.exists() else []
+        
+        if inbox_files:
+            with st.expander(f"Found {len(inbox_files)} file(s) in inbox/", expanded=False):
+                for file in inbox_files:
+                    col1, col2, col3 = st.columns([4, 2, 1])
+                    with col1:
+                        st.markdown(f"**{file.name}**")
+                    with col2:
+                        size = file.stat().st_size
+                        size_str = f"{size/1024:.1f} KB" if size < 1024*1024 else f"{size/(1024*1024):.1f} MB"
+                        st.caption(f"{size_str} • {time.strftime('%m/%d %I:%M %p', time.localtime(file.stat().st_mtime))}")
+                    with col3:
+                        if st.button("Ingest", key=f"ingest_{file.name}", use_container_width=True):
+                            trigger_ingest(file)
+                            st.rerun()
+        else:
+            st.info("No .md files found in inbox/. Upload a file above or add files to the inbox directory.")
+        
+        st.markdown("---")
+        
+        # --- Progress Status Display ---
+        if "ingest_status" in st.session_state:
+            status = st.session_state.ingest_status
+            
+            if status["stage"] == "loading":
+                st.warning(f"⏳ Loading model: `{status['model']}`...")
+            elif status["stage"] == "embedding":
+                st.info(f"🔄 Embedding chunks...")
+            elif status["stage"] == "unloading":
+                st.info("💾 Unloading model...")
+            elif status["stage"] == "done":
+                ram_freed = status.get("ram_freed", 0)
+                ram_freed_mb = ram_freed / (1024 * 1024)
+                st.success(f"✅ Ingested `{status['file']}`! Model unloaded. Freed ~{ram_freed_mb:.1f} MB RAM.")
+                if st.button("Clear status", key="clear_status"):
+                    del st.session_state.ingest_status
+                    st.rerun()
+            elif status["stage"] == "error":
+                st.error(f"❌ Failed to ingest `{status.get('file', 'file')}`: {status.get('error', 'Unknown error')}")
+                if st.button("Clear error", key="clear_error"):
+                    del st.session_state.ingest_status
+                    st.rerun()
+        
+        st.markdown("---")
+        
+        # --- Manual Path Input (Fallback) ---
+        st.markdown("#### Manual File Path (Fallback)")
         file_path = st.text_input("File path to ingest (.md)", str(Path("knowledge/inbox").resolve() / "test.md"))
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Embed Now (Load → Embed → Unload)", type="primary"):
-                if file_path:
-                    file_obj = Path(file_path)
-                    if file_obj.exists() and file_obj.suffix.lower() == ".md":
-                        with st.spinner("Loading model, embedding, unloading..."):
-                            result = ingest_file(str(file_obj.resolve()))
-                            if result.get("success"):
-                                st.success(f"✅ Done! {result.get('message', '')} Model unloaded. RAM freed.")
-                            else:
-                                st.error(f"❌ Error: {result.get('message', 'Unknown error')}")
-                    else:
-                        st.error("File does not exist or is not a .md file")
+        if st.button("Embed Now (Load → Embed → Unload)", type="secondary"):
+            if file_path:
+                file_obj = Path(file_path)
+                if file_obj.exists() and file_obj.suffix.lower() == ".md":
+                    trigger_ingest(file_obj)
+                    st.rerun()
                 else:
-                    st.error("Please provide a file path")
+                    st.error("File does not exist or is not a .md file")
+            else:
+                st.error("Please provide a file path")
         
         st.markdown("---")
         

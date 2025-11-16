@@ -89,11 +89,15 @@ def embed_and_upsert(md_path: Path, batch_size: int = None):
         all_metadatas = []
         all_embeddings = []
         
+        logger.info(f"Starting embedding process for {len(chunks)} chunks using {config.OLLAMA_EMBED_MODEL}")
+        
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]
             
-            # Use Ollama to embed the batch
+            # Use Ollama to embed the batch (auto-loads model, embeds, then unloads)
+            logger.info(f"Embedding batch {i//batch_size + 1} ({len(batch)} chunks)...")
             batch_embeddings = embed_texts(batch, model=config.OLLAMA_EMBED_MODEL)
+            logger.info(f"Batch {i//batch_size + 1} embedded successfully. Model unloaded.")
             
             for j, (chunk, embedding) in enumerate(zip(batch, batch_embeddings)):
                 chunk_id = f"{file_hash_val}_{i+j}"

@@ -185,8 +185,10 @@ def embed_texts(texts: List[str], model: str = None) -> List[List[float]]:
         
         logger.info(f"Successfully embedded {len(embeddings)} chunks")
         
-        # Unload model after embedding to free RAM
+        # Unload model after embedding to free RAM immediately
+        logger.info(f"Unloading {model} to free RAM...")
         unload_model(model)
+        logger.info(f"Model {model} unloaded. RAM should be freed by Ollama.")
         
         return embeddings
         
