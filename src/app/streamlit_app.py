@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
+import webbrowser
 
 # Add parent directory to path so we can import from src
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -11,7 +13,8 @@ from src import rag_utils
 from src.api_client import (
     check_backend_available, get_llm_status, start_lm_studio, stop_lm_studio,
     get_ollama_status, list_documents, get_document, update_document_metadata, 
-    run_ingestion, ingest_file, get_umap_coords, get_corpus_stats
+    run_ingestion, ingest_file, get_umap_coords, get_corpus_stats,
+    get_graph_nodes, get_graph_edges
 )
 
 st.set_page_config(page_title="Powercore RAG Control Panel", layout="wide")
@@ -25,7 +28,7 @@ if not backend_available:
     st.warning("⚠️ FastAPI backend is not running. Start it with: `python -m backend.app` or `scripts/run_backend.bat`")
 
 # Create tabs
-tabs = st.tabs(["Dashboard", "Chat", "Library", "Ingest", "Visualize", "Prompts"])
+tabs = st.tabs(["Dashboard", "Chat", "Library", "Ingest", "Visualize", "Graph", "Prompts"])
 
 # Dashboard Tab
 with tabs[0]:
@@ -227,8 +230,176 @@ with tabs[4]:
     else:
         st.warning("Backend not available. Start the FastAPI backend to use Visualizations.")
 
-# Prompts Tab
+# Graph Tab
 with tabs[5]:
+    st.header("Knowledge Graph")
+    
+    if backend_available:
+        # Helper function to open file in Cursor
+        def open_in_cursor(path: str):
+            """Open file in Cursor IDE."""
+            try:
+                # Use the existing FastAPI endpoint
+                import requests
+                response = requests.post(
+                    f"http://127.0.0.1:8000/open/cursor",
+                    params={"path": path},
+                    timeout=5
+                )
+                return response.json().get("success", False)
+            except:
+                # Fallback: try webbrowser
+                try:
+                    url = f"cursor://file/{os.path.abspath(path)}"
+                    webbrowser.open(url)
+                    return True
+                except:
+                    return False
+        
+        if "graph_data" not in st.session_state:
+            st.session_state.graph_data = None
+        
+        col1, col2 = st.columns([1, 3])
+        
+        with col1:
+            st.markdown("### Filters")
+            
+            # Get available tags from nodes
+            all_tags = set()
+            try:
+                nodes_data = get_graph_nodes()
+                for node in nodes_data.get("nodes", []):
+                    if "tags" in node.get("metadata", {}):
+                        tags_list = node["metadata"]["tags"]
+                        if isinstance(tags_list, list):
+                            all_tags.update(tags_list)
+            except:
+                pass
+            
+            tags = st.multiselect("Filter by Tags", sorted(all_tags))
+            min_quality = st.slider("Min Quality", 0.0, 1.0, 0.5, 0.05)
+            threshold = st.slider("Similarity Threshold", 0.5, 1.0, 0.75, 0.01)
+            
+            if st.button("🔄 Refresh Graph"):
+                st.session_state.graph_data = None
+                st.rerun()
+        
+        with col2:
+            if st.session_state.graph_data is None:
+                with st.spinner("Building graph..."):
+                    try:
+                        nodes_data = get_graph_nodes(tags=tags, min_quality=min_quality)
+                        edges_data = get_graph_edges(threshold=threshold)
+                        
+                        if "error" in nodes_data or "error" in edges_data:
+                            st.error(f"Error loading graph: {nodes_data.get('error') or edges_data.get('error')}")
+                        else:
+                            st.session_state.graph_data = (
+                                nodes_data.get("nodes", []),
+                                edges_data.get("edges", [])
+                            )
+                    except Exception as e:
+                        st.error(f"Error building graph: {e}")
+                        st.session_state.graph_data = ([], [])
+            
+            nodes, edges = st.session_state.graph_data if st.session_state.graph_data else ([], [])
+            
+            if not nodes:
+                st.info("No nodes found. Ingest some documents first to see the graph.")
+            else:
+                try:
+                    from pyvis.network import Network
+                    
+                    net = Network(
+                        height="700px",
+                        width="100%",
+                        bgcolor="#1e1e1e",
+                        font_color="white",
+                        select_menu=True,
+                        filter_menu=True
+                    )
+                    
+                    net.barnes_hut(
+                        gravity=-8000,
+                        central_gravity=0.3,
+                        spring_length=200,
+                        spring_strength=0.05,
+                        damping=0.9
+                    )
+                    
+                    # Add nodes
+                    for node in nodes:
+                        if node["type"] == "document":
+                            color = "#00ff41"
+                            size = 25
+                            shape = "box"
+                        else:  # chunk
+                            color = "#00aaff"
+                            size = 15
+                            shape = "dot"
+                        
+                        title = node["metadata"].get("text", node["label"])
+                        net.add_node(
+                            node["id"],
+                            label=node["label"],
+                            title=title,
+                            color=color,
+                            size=size,
+                            shape=shape
+                        )
+                    
+                    # Add edges
+                    for edge in edges:
+                        net.add_edge(
+                            edge["source"],
+                            edge["target"],
+                            value=edge["weight"] * 10,
+                            title=edge["label"],
+                            color="#888888"
+                        )
+                    
+                    # Generate HTML
+                    net.show("rag_graph.html")
+                    
+                    # Read and display HTML
+                    with open("rag_graph.html", "r", encoding="utf-8") as f:
+                        html = f.read()
+                    
+                    components.html(html, height=700, scrolling=True)
+                    
+                    # Open in Cursor button
+                    st.markdown("---")
+                    if st.button("📝 Open Selected in Cursor"):
+                        # Note: Pyvis selection requires JavaScript interaction
+                        # For now, we'll use a text input to select a node
+                        st.info("💡 Click on a node in the graph, then use the node ID below to open it.")
+                        
+                        node_id = st.text_input("Node ID (from graph)", "")
+                        if node_id:
+                            # Find the node
+                            selected_node = next((n for n in nodes if n["id"] == node_id), None)
+                            if selected_node:
+                                source_path = selected_node["metadata"].get("source")
+                                if source_path and os.path.exists(source_path):
+                                    if open_in_cursor(source_path):
+                                        st.success(f"✅ Opened: {source_path}")
+                                    else:
+                                        st.error("Failed to open in Cursor")
+                                else:
+                                    st.error(f"File not found: {source_path}")
+                            else:
+                                st.error("Node not found")
+                
+                except ImportError:
+                    st.error("Pyvis not installed. Run: pip install pyvis==0.3.2")
+                except Exception as e:
+                    st.error(f"Error rendering graph: {e}")
+                    st.exception(e)
+    else:
+        st.warning("Backend not available. Start the FastAPI backend to use the Graph view.")
+
+# Prompts Tab
+with tabs[6]:
     st.header("Prompt Repository")
     st.info("Prompt repository functionality coming soon. Use the FastAPI backend directly for now.")
 

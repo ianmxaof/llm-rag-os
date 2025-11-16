@@ -151,3 +151,34 @@ def ingest_file(path: str) -> Dict:
     except Exception as e:
         return {"success": False, "message": str(e)}
 
+
+def get_graph_nodes(tags=None, min_quality=0.0) -> Dict:
+    """Get graph nodes (documents and chunks)."""
+    try:
+        params = {"min_quality": min_quality}
+        if tags:
+            params["tags"] = ",".join(tags) if isinstance(tags, list) else tags
+        response = requests.get(
+            f"{API_BASE}/graph/nodes",
+            params=params,
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        return {"nodes": [], "error": str(e)}
+
+
+def get_graph_edges(threshold=0.75) -> Dict:
+    """Get graph edges (similarity relationships)."""
+    try:
+        response = requests.get(
+            f"{API_BASE}/graph/edges",
+            params={"threshold": threshold},
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        return {"edges": [], "error": str(e)}
+

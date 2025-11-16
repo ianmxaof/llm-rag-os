@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.controllers import llm, ingest, library, visualize, prompts, ollama
+from backend.controllers import llm, ingest, library, visualize, prompts, ollama, graph
 from backend.models import init_db
 
 # Configure logging
@@ -46,6 +46,7 @@ app.include_router(ingest.router, prefix="/ingest", tags=["Ingestion"])
 app.include_router(library.router, prefix="/library", tags=["Library"])
 app.include_router(visualize.router, prefix="/visualize", tags=["Visualization"])
 app.include_router(prompts.router, prefix="/prompts", tags=["Prompts"])
+app.include_router(graph.router)  # Router already has /graph prefix
 
 
 @app.post("/open/cursor")
