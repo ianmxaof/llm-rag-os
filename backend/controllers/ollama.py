@@ -326,12 +326,26 @@ def get_status():
         else:
             return {
                 "available": False,
-                "error": f"API returned status {response.status_code}"
+                "error": f"Ollama API returned status {response.status_code}",
+                "api_url": config.OLLAMA_API_BASE
             }
+    except requests.exceptions.Timeout as e:
+        return {
+            "available": False,
+            "error": f"Connection to Ollama timed out at {config.OLLAMA_API_BASE}. Make sure Ollama is running: `ollama serve`",
+            "api_url": config.OLLAMA_API_BASE
+        }
+    except requests.exceptions.ConnectionError as e:
+        return {
+            "available": False,
+            "error": f"Cannot connect to Ollama at {config.OLLAMA_API_BASE}. Make sure Ollama is running: `ollama serve`",
+            "api_url": config.OLLAMA_API_BASE
+        }
     except Exception as e:
         return {
             "available": False,
-            "error": str(e)
+            "error": f"Error checking Ollama status: {str(e)}. Make sure Ollama is running: `ollama serve`",
+            "api_url": config.OLLAMA_API_BASE
         }
 
 
