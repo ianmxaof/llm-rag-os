@@ -157,6 +157,66 @@ with tabs[3]:
     
     if backend_available:
         st.subheader("Single File Ingestion (Ollama)")
+        
+        # File Browser Section
+        st.markdown("#### Browse Local Files")
+        default_dir = str(Path("knowledge/inbox").resolve())
+        
+        if "current_dir" not in st.session_state:
+            st.session_state.current_dir = default_dir
+        if "show_browser" not in st.session_state:
+            st.session_state.show_browser = False
+        
+        col_browse, col_close = st.columns([3, 1])
+        with col_browse:
+            if st.button("📁 Browse Files", key="browse_btn"):
+                st.session_state.show_browser = True
+                st.session_state.current_dir = default_dir
+                st.rerun()
+        
+        if st.session_state.show_browser:
+            st.markdown("---")
+            col_dir, col_go, col_close_btn = st.columns([4, 1, 1])
+            with col_dir:
+                new_dir = st.text_input("Directory:", value=st.session_state.current_dir, key="dir_input")
+            with col_go:
+                if st.button("Go"):
+                    if os.path.isdir(new_dir):
+                        st.session_state.current_dir = new_dir
+                        st.rerun()
+            with col_close_btn:
+                if st.button("Close"):
+                    st.session_state.show_browser = False
+                    st.rerun()
+            
+            if os.path.isdir(st.session_state.current_dir):
+                st.markdown(f"**Contents of:** `{st.session_state.current_dir}`")
+                try:
+                    items = sorted(os.listdir(st.session_state.current_dir))
+                    for item in items:
+                        item_path = os.path.join(st.session_state.current_dir, item)
+                        if os.path.isfile(item_path) and item.endswith(".md"):
+                            col_file, col_copy = st.columns([3, 1])
+                            with col_file:
+                                st.text(f"📄 {item}")
+                            with col_copy:
+                                if st.button(f"Copy → inbox", key=f"copy_{item_path}"):
+                                    import shutil
+                                    target = Path("knowledge/inbox") / item
+                                    target.parent.mkdir(parents=True, exist_ok=True)
+                                    shutil.copy2(item_path, str(target))
+                                    st.success(f"✅ Copied to inbox: {item}")
+                                    st.rerun()
+                        elif os.path.isdir(item_path):
+                            if st.button(f"📁 {item}/", key=f"dir_{item_path}"):
+                                st.session_state.current_dir = item_path
+                                st.rerun()
+                except PermissionError:
+                    st.error("Permission denied accessing this directory")
+            st.markdown("---")
+        
+        # Manual Path Input + Embed
+        st.markdown("#### Manual File Path")
         file_path = st.text_input("File path to ingest (.md)", str(Path("knowledge/inbox").resolve() / "test.md"))
         
         col1, col2 = st.columns(2)
@@ -235,6 +295,11 @@ with tabs[5]:
     st.header("Knowledge Graph")
     
     if backend_available:
+        # Show last refresh time
+        if "graph_last_refresh" not in st.session_state:
+            st.session_state.graph_last_refresh = "Never"
+        st.caption(f"Last refresh: {st.session_state.graph_last_refresh}")
+        
         # Helper function to open file in Cursor
         def open_in_cursor(path: str):
             """Open file in Cursor IDE."""
@@ -280,9 +345,18 @@ with tabs[5]:
             min_quality = st.slider("Min Quality", 0.0, 1.0, 0.5, 0.05)
             threshold = st.slider("Similarity Threshold", 0.5, 1.0, 0.75, 0.01)
             
-            if st.button("🔄 Refresh Graph"):
-                st.session_state.graph_data = None
-                st.rerun()
+            col_refresh, col_force = st.columns(2)
+            with col_refresh:
+                if st.button("🔄 Refresh Graph"):
+                    st.session_state.graph_data = None
+                    st.session_state.graph_last_refresh = time.strftime("%H:%M:%S")
+                    st.rerun()
+            with col_force:
+                if st.button("⚡ Force Refresh", help="Clear cache and rebuild graph"):
+                    st.session_state.graph_data = None
+                    st.session_state.graph_last_refresh = None
+                    st.session_state.graph_last_refresh = time.strftime("%H:%M:%S")
+                    st.rerun()
         
         with col2:
             if st.session_state.graph_data is None:

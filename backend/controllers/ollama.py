@@ -23,6 +23,16 @@ router = APIRouter()
 _last_used: Dict[str, float] = {}
 
 
+def is_ollama_running() -> bool:
+    """Check if Ollama server is running."""
+    try:
+        response = requests.get(f"{config.OLLAMA_API_BASE}/tags", timeout=5)
+        return response.status_code == 200
+    except requests.exceptions.RequestException as e:
+        logger.debug(f"Ollama connection check failed: {e}")
+        return False
+
+
 def is_model_loaded(model: str) -> bool:
     """Check if a model is currently loaded in Ollama."""
     try:
@@ -254,10 +264,55 @@ _daemon_thread = threading.Thread(target=auto_unload_daemon, daemon=True)
 _daemon_thread.start()
 
 
+@router.on_event("startup")
+async def startup_pull_model():
+    """Auto-pull Mistral model on startup if not present."""
+    if not is_ollama_running():
+        logger.warning("Ollama not running on startup - skipping model pull")
+        return
+    
+    try:
+        # Check if model already exists
+        response = requests.get(f"{config.OLLAMA_API_BASE}/tags", timeout=5)
+        if response.status_code == 200:
+            models = [m["name"] for m in response.json().get("models", [])]
+            if config.OLLAMA_CHAT_MODEL not in models:
+                logger.info(f"Auto-pulling {config.OLLAMA_CHAT_MODEL} on startup...")
+                pull_response = requests.post(
+                    f"{config.OLLAMA_API_BASE}/pull",
+                    json={"name": config.OLLAMA_CHAT_MODEL},
+                    timeout=300,
+                    stream=True
+                )
+                if pull_response.status_code == 200:
+                    # Stream the pull progress
+                    for line in pull_response.iter_lines():
+                        if line:
+                            try:
+                                data = json.loads(line.decode('utf-8'))
+                                if data.get("status") == "success":
+                                    logger.info(f"Successfully pulled {config.OLLAMA_CHAT_MODEL}")
+                                    break
+                            except:
+                                pass
+                else:
+                    logger.warning(f"Failed to pull model: {pull_response.text}")
+            else:
+                logger.info(f"Model {config.OLLAMA_CHAT_MODEL} already exists")
+    except Exception as e:
+        logger.error(f"Failed to auto-pull model on startup: {e}")
+
+
 @router.get("/status")
 def get_status():
     """Get Ollama service status."""
     try:
+        if not is_ollama_running():
+            return {
+                "available": False,
+                "error": "Ollama server is not running or not reachable",
+                "api_url": config.OLLAMA_API_BASE
+            }
         response = requests.get(f"{config.OLLAMA_API_BASE}/tags", timeout=5)
         if response.status_code == 200:
             models = response.json().get("models", [])
