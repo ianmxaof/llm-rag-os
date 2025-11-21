@@ -296,22 +296,269 @@ python scripts/watch_and_ingest.py
 
 ## Deployment (Docker)
 
-For containerized setup (recommended for production/testing):
+Docker deployment is **recommended for production** and provides an isolated, reproducible environment. The system runs as a single container with all services orchestrated together.
+
+### Quick Start
+
+**One-command deployment:**
 
 ```bash
-docker-compose -f docker/intelligence-minimal.yml up -d
+docker-compose up -d
 ```
 
-This spins up:
-- Ollama (local models)
-- FastAPI backend (port 8000)
-- Streamlit UI (port 8501)
-- Volume mounts for `knowledge/` and `data/` (persistent)
+This spins up the complete stack:
+- **Ollama** (local LLM inference) - Port `11434`
+- **FastAPI backend** (REST API) - Port `8000`
+- **Streamlit UI** (Web interface) - Port `8501`
 
-Customize via `docker-compose.yml` (e.g., expose Ollama on custom port). Build custom image:
+Access the services:
+- **Streamlit UI**: http://localhost:8501
+- **FastAPI Docs**: http://localhost:8000/docs
+- **Ollama API**: http://localhost:11434/api
+
+### Docker Compose Configuration
+
+The `docker-compose.yml` includes:
+
+**Services:**
+- Single `rag` service with all components
+- Auto-restart on failure (`restart: unless-stopped`)
+- Health checks and proper service dependencies
+
+**Volume Mounts (Persistent Data):**
+- `./knowledge` → `/app/knowledge` (inbox, processed files, Obsidian vault)
+- `./chroma` → `/app/chroma` (ChromaDB vector store)
+- `./data` → `/app/data` (LanceDB, SQLite ledger, other data)
+
+**Port Mappings:**
+- `8501:8501` - Streamlit UI
+- `8000:8000` - FastAPI backend
+- `11434:11434` - Ollama API
+
+**Environment Variables:**
+- `OLLAMA_API_BASE` - Ollama API endpoint
+- `OLLAMA_EMBED_MODEL` - Embedding model name
+- `OLLAMA_CHAT_MODEL` - Chat model name
+
+### Customization
+
+**Override environment variables:**
+
+Create a `.env` file (see [Environment Variables & API Keys](#environment-variables--api-keys)):
 
 ```bash
-docker build -t llm-rag-os .
+# .env
+OLLAMA_EMBED_MODEL=nomic-embed-text
+OLLAMA_CHAT_MODEL=mistral:7b-instruct-q5_K_M
+GITHUB_TOKEN=your_token_here
+```
+
+Docker Compose automatically loads `.env` files.
+
+**Custom port mapping:**
+
+Edit `docker-compose.yml`:
+
+```yaml
+ports:
+  - "8502:8501"  # Streamlit on custom port
+  - "8001:8000"  # FastAPI on custom port
+```
+
+**Add additional volumes:**
+
+```yaml
+volumes:
+  - ./knowledge:/app/knowledge
+  - ./chroma:/app/chroma
+  - ./data:/app/data
+  - ./prompts:/app/prompts  # Add prompts directory
+```
+
+### Building Custom Images
+
+**Build from Dockerfile:**
+
+```bash
+docker build -t llm-rag-os:latest .
+```
+
+**Build with custom tag:**
+
+```bash
+docker build -t llm-rag-os:v0.2 .
+```
+
+**Build with build arguments:**
+
+```bash
+docker build \
+  --build-arg PYTHON_VERSION=3.11 \
+  --build-arg INSTALL_OBSIDIAN_DEPS=true \
+  -t llm-rag-os:custom .
+```
+
+### Development vs Production
+
+**Development (with hot reload):**
+
+```bash
+# Mount source code for live editing
+docker-compose -f docker-compose.dev.yml up
+```
+
+**Production (optimized):**
+
+```bash
+# Use pre-built image, no source mounts
+docker-compose up -d
+```
+
+### Docker Commands Reference
+
+**Start services:**
+```bash
+docker-compose up -d          # Start in background
+docker-compose up              # Start with logs
+```
+
+**Stop services:**
+```bash
+docker-compose stop            # Stop services
+docker-compose down             # Stop and remove containers
+docker-compose down -v          # Stop and remove volumes (⚠️ deletes data)
+```
+
+**View logs:**
+```bash
+docker-compose logs -f         # Follow all logs
+docker-compose logs rag         # Service-specific logs
+```
+
+**Execute commands in container:**
+```bash
+docker-compose exec rag bash                    # Open shell
+docker-compose exec rag python scripts/ingest.py  # Run ingestion
+docker-compose exec rag ollama list              # List Ollama models
+```
+
+**Pull models in container:**
+```bash
+docker-compose exec rag ollama pull nomic-embed-text
+docker-compose exec rag ollama pull mistral
+```
+
+### Multi-Container Setup (Advanced)
+
+For production deployments, you can split services:
+
+**Option 1: Separate Ollama service**
+
+```yaml
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"
+  
+  rag-backend:
+    build: .
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_API_BASE=http://ollama:11434/api
+```
+
+**Option 2: External Ollama**
+
+If Ollama runs on the host:
+
+```yaml
+services:
+  rag:
+    build: .
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - OLLAMA_API_BASE=http://host.docker.internal:11434/api
+```
+
+### Troubleshooting Docker
+
+**Container won't start:**
+```bash
+# Check logs
+docker-compose logs rag
+
+# Check container status
+docker-compose ps
+
+# Restart services
+docker-compose restart
+```
+
+**Port already in use:**
+```bash
+# Find process using port
+# Windows
+netstat -ano | findstr :8000
+
+# Linux/macOS
+lsof -i :8000
+
+# Change ports in docker-compose.yml
+```
+
+**Volume permissions:**
+```bash
+# Fix permissions (Linux/macOS)
+sudo chown -R $USER:$USER knowledge/ chroma/ data/
+
+# Or run container with user mapping
+docker-compose run --user $(id -u):$(id -g) rag bash
+```
+
+**Ollama models not persisting:**
+- Models are stored in container by default
+- Mount Ollama data directory: `- ./ollama-data:/root/.ollama`
+
+**Out of disk space:**
+```bash
+# Clean up Docker
+docker system prune -a
+
+# Remove unused volumes
+docker volume prune
+```
+
+### Production Deployment Checklist
+
+- [ ] Set strong passwords/API keys in `.env`
+- [ ] Configure volume backups for `knowledge/`, `chroma/`, `data/`
+- [ ] Set up health checks and monitoring
+- [ ] Configure reverse proxy (nginx/traefik) for HTTPS
+- [ ] Set resource limits (CPU/memory) in docker-compose.yml
+- [ ] Enable log rotation
+- [ ] Pull required Ollama models before deployment
+- [ ] Test volume persistence across container restarts
+
+### Docker Compose Examples
+
+**Minimal setup (testing):**
+```bash
+docker-compose -f docker/intelligence-minimal.yml up
+```
+
+**Full stack with all features:**
+```bash
+docker-compose up -d
+```
+
+**Development with source mounts:**
+```bash
+docker-compose -f docker-compose.dev.yml up
 ```
 
 ---
