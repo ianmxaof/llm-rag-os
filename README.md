@@ -1,5 +1,11 @@
 # llm-rag — Unified Local RAG + Intelligence OS + Obsidian Integration
 
+[![Stars](https://img.shields.io/github/stars/ianmxaof/llm-rag-os?style=social)](https://github.com/ianmxaof/llm-rag-os)
+[![Forks](https://img.shields.io/github/forks/ianmxaof/llm-rag-os?style=social)](https://github.com/ianmxaof/llm-rag-os)
+[![License](https://img.shields.io/github/license/ianmxaof/llm-rag-os)](LICENSE)
+
+**⭐ Star this repo if local-first RAG + Obsidian sovereignty excites you—join the evolution!**
+
 A modular local-first Retrieval-Augmented Generation (RAG) system integrating:
 
 - **Multi-source automated knowledge ingestion** (GitHub, RSS, arXiv, Reddit, local files)
@@ -38,10 +44,13 @@ This README provides complete setup instructions, including cloning, environment
 
 ### ✔ Local Embeddings, Chat, and Refinement
 
-Uses **Ollama** for:
-- `nomic-embed-text` (embeddings)
-- `mistral` (chat)
-- Your choice of LLM for refinement (Ollama or Anthropic/OpenAI)
+Uses **Ollama** for a multi-stage LLM chain:
+
+| Stage | Model/Example | Purpose |
+|-------|---------------|---------|
+| **Embedding** | `nomic-embed-text` (Ollama/fastembed) | Vectorize chunks (384-dim, multilingual) |
+| **Refinement** | `llama3.1` (Ollama) or Anthropic/OpenAI | Summarize/enhance content pre-storage |
+| **Chat/Generation** | `mistral:7b-instruct-q5_K_M` (Ollama) | Final uncensored response generation |
 
 **fastembed** integration for 3-6x faster embeddings (optional, recommended)
 
@@ -57,8 +66,8 @@ Pulls content from:
 
 ### ✔ Vector Database Stack
 
-- **ChromaDB** — documents (primary vector store)
-- **LanceDB** — prompts + Obsidian notes (hybrid BM25+vector search)
+- **ChromaDB** — documents (primary vector store; excels at simple, high-volume semantic search)
+- **LanceDB** — prompts + Obsidian notes (hybrid BM25+vector search via Tantivy FTS; ideal for metadata-rich, structured content like YAML frontmatter and prompt categories—3-5x denser storage, faster cold queries)
 - **SQLite** — ingestion ledger (deduplication)
 
 ### ✔ Automated Pre-Pipeline
@@ -92,22 +101,29 @@ Pulls content from:
 External Sources → Collectors → Ingestion Queue → Refinement → Vector Stores → Query Pipeline → LLM Response
 ```
 
-**Data Plane:**
-- Collectors (GitHub, RSS, arXiv, Reddit)
-- Ingestion pipeline (preprocess → chunk → embed → store)
-- Vector stores (ChromaDB, LanceDB)
-- SQLite ledger (deduplication)
+**Data Plane:** Collectors (GitHub, RSS, arXiv, Reddit) → Ingestion pipeline (preprocess → chunk → embed → store) → Vector stores (ChromaDB, LanceDB) → SQLite ledger (deduplication)
 
-**Control Plane:**
-- FastAPI backend (orchestration)
-- Queue management (priority, scheduling)
-- Refinement service (LLM-powered enhancement)
-- Secret scanning (TruffleHog)
+**Control Plane:** FastAPI backend (orchestration) → Queue management → Refinement service → Secret scanning (TruffleHog)
 
-**Infrastructure Plane:**
-- Ollama (local LLM inference)
-- Streamlit UI (user interface)
-- File watchers (Obsidian, inbox)
+**Infrastructure Plane:** Ollama (local LLM) → Streamlit UI → File watchers (Obsidian, inbox)
+
+```mermaid
+graph LR
+    subgraph "External Sources"
+        A[GitHub/RSS/arXiv/Reddit] --> B[Collectors]
+    end
+    B --> C[Ingestion Queue]
+    C --> D[Refinement LLM]
+    D --> E[Vector Stores<br/>ChromaDB + LanceDB]
+    E --> F[SQLite Ledger<br/>(Deduplication)]
+    F --> G[Query Pipeline<br/>(Hybrid Search)]
+    G --> H[Ollama Uncensored<br/>(dolphin/mistral)]
+    H --> I[Streamlit UI / API Response]
+    J[Obsidian Vault] -.->|Watcher| E
+    K[Prompts Curated] -.->|RAG Layer| G
+    style E fill:#e1f5fe
+    style G fill:#f3e5f5
+```
 
 ---
 
@@ -274,6 +290,28 @@ python scripts/obsidian_rag_ingester.py
 
 # Start inbox watcher
 python scripts/watch_and_ingest.py
+```
+
+---
+
+## Deployment (Docker)
+
+For containerized setup (recommended for production/testing):
+
+```bash
+docker-compose -f docker/intelligence-minimal.yml up -d
+```
+
+This spins up:
+- Ollama (local models)
+- FastAPI backend (port 8000)
+- Streamlit UI (port 8501)
+- Volume mounts for `knowledge/` and `data/` (persistent)
+
+Customize via `docker-compose.yml` (e.g., expose Ollama on custom port). Build custom image:
+
+```bash
+docker build -t llm-rag-os .
 ```
 
 ---
@@ -488,7 +526,9 @@ python scripts/obsidian_api.py
 
 ### Documentation
 
-See `scripts/OBSIDIAN_RAG_README.md` for detailed documentation.
+**📚 Detailed Documentation:**
+- [Obsidian RAG Implementation Summary](OBSIDIAN_RAG_IMPLEMENTATION_SUMMARY.md) - Complete technical details
+- [Obsidian RAG README](scripts/OBSIDIAN_RAG_README.md) - Usage guide and API reference
 
 ---
 
@@ -534,7 +574,9 @@ curl -X GET "http://localhost:8000/prompts/retrieve?query=improve+logging&top_k=
 
 ### Documentation
 
-See `PROMPT_RAG_README.md` for detailed documentation.
+**📚 Detailed Documentation:**
+- [Prompt RAG README](PROMPT_RAG_README.md) - Complete guide and API reference
+- [Prompt RAG Implementation Summary](PROMPT_RAG_IMPLEMENTATION_SUMMARY.md) - Technical architecture
 
 ---
 
@@ -588,7 +630,9 @@ curl -X POST "http://localhost:8000/queue/add" \
 
 ### Documentation
 
-See `INTELLIGENCE_OS_README.md` for detailed documentation.
+**📚 Detailed Documentation:**
+- [Intelligence OS README](INTELLIGENCE_OS_README.md) - Complete guide and collector documentation
+- [Intelligence OS Implementation Summary](INTELLIGENCE_OS_IMPLEMENTATION.md) - Technical architecture
 
 ---
 
