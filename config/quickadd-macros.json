@@ -1,0 +1,44 @@
+{
+  "macros": [
+    {
+      "name": "New Master Note",
+      "description": "Create a new note using MasterNote template",
+      "steps": [
+        {
+          "type": "Template",
+          "template": "_templates/MasterNote.md",
+          "folder": "knowledge/notes/Manual",
+          "fileName": "{{VALUE}}"
+        }
+      ]
+    },
+    {
+      "name": "Summarize Current Note",
+      "description": "Generate semantic summary for current note",
+      "steps": [
+        {
+          "type": "Templater",
+          "command": "semantic_summary"
+        }
+      ]
+    },
+    {
+      "name": "Move to Auto",
+      "description": "Add ingest tag and move note to Auto folder",
+      "steps": [
+        {
+          "type": "Frontmatter",
+          "action": "add",
+          "key": "tags",
+          "value": ["ingest"]
+        },
+        {
+          "type": "Move",
+          "destination": "knowledge/notes/Auto"
+        }
+      ]
+    }
+  ],
+  "note": "Import this JSON into QuickAdd plugin settings. Adjust paths based on your vault structure."
+}
+

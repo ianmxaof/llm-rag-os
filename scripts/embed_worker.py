@@ -16,6 +16,7 @@ import chromadb
 
 from scripts.config import config
 from scripts.preprocess import preprocess_text
+from scripts.enrichment import enrich_document
 from backend.controllers.ollama import embed_texts
 
 # Try watchdog for file monitoring
@@ -67,6 +68,30 @@ def embed_and_upsert(md_path: Path, batch_size: int = None):
         logger.error(f"Failed to read {md_path}: {e}")
         return False
     
+    # Enrich document with metadata (tags, summary, title, quality score)
+    logger.info(f"Enriching document: {md_path.name}")
+    enrichment_result = enrich_document(text)
+    
+    # Quality gate: check if enrichment failed
+    if "retry" in enrichment_result and enrichment_result.get("retry"):
+        logger.error(f"Enrichment failed for {md_path.name}: {enrichment_result.get('error', 'Unknown error')}")
+        # Move to error directory
+        try:
+            config.ERROR_DIR.mkdir(parents=True, exist_ok=True)
+            error_path = config.ERROR_DIR / md_path.name
+            shutil.move(str(md_path), str(error_path))
+            logger.info(f"Moved failed file to error directory: {error_path}")
+        except Exception as e:
+            logger.error(f"Failed to move file to error directory: {e}")
+        return False
+    
+    # Extract enrichment metadata
+    doc_summary = enrichment_result.get("summary", "")
+    doc_tags = enrichment_result.get("tags", [])
+    doc_title = enrichment_result.get("title", md_path.stem)
+    quality_score = enrichment_result.get("quality_score", 5)
+    ingest_ts = enrichment_result.get("ingest_ts", "")
+    
     # Preprocess and chunk
     chunks = preprocess_text(text, clean=True)
     if not chunks:
@@ -103,11 +128,19 @@ def embed_and_upsert(md_path: Path, batch_size: int = None):
                 chunk_id = f"{file_hash_val}_{i+j}"
                 all_ids.append(chunk_id)
                 all_documents.append(chunk)
-                all_metadatas.append({
+                
+                # Add enriched metadata to each chunk
+                chunk_metadata = {
                     "source": str(md_path),
                     "chunk": i + j,
-                    "file_hash": file_hash_val
-                })
+                    "file_hash": file_hash_val,
+                    "title": doc_title,
+                    "summary": doc_summary,
+                    "tags": doc_tags,  # ChromaDB will handle list serialization
+                    "quality_score": quality_score,
+                    "ingest_ts": ingest_ts
+                }
+                all_metadatas.append(chunk_metadata)
                 all_embeddings.append(embedding)
         
         # Upsert to ChromaDB
@@ -124,8 +157,53 @@ def embed_and_upsert(md_path: Path, batch_size: int = None):
         try:
             config.ARCHIVE.mkdir(parents=True, exist_ok=True)
             archive_path = config.ARCHIVE / md_path.name
+            
+            # Handle duplicate filenames
+            counter = 1
+            while archive_path.exists():
+                name_parts = md_path.name.rsplit(".", 1)
+                if len(name_parts) == 2:
+                    new_filename = f"{name_parts[0]}_{counter}.{name_parts[1]}"
+                else:
+                    new_filename = f"{md_path.name}_{counter}"
+                archive_path = config.ARCHIVE / new_filename
+                counter += 1
+            
             shutil.move(str(md_path), str(archive_path))
             logger.info(f"Archived {md_path.name} to {archive_path}")
+            
+            # Create auto-tag folder structure with symlinks
+            if doc_tags:
+                try:
+                    config.TAGS_DIR.mkdir(parents=True, exist_ok=True)
+                    for tag in doc_tags:
+                        # Normalize tag: lowercase, replace spaces with underscores
+                        tag_normalized = tag.lower().replace(" ", "_").replace("/", "_")
+                        tag_dir = config.TAGS_DIR / tag_normalized
+                        tag_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        # Create symlink
+                        symlink_path = tag_dir / archive_path.name
+                        if not symlink_path.exists():
+                            try:
+                                symlink_path.symlink_to(archive_path)
+                                logger.info(f"Created symlink: {symlink_path} -> {archive_path}")
+                            except OSError as e:
+                                # Symlinks might not be supported on Windows, use copy instead
+                                if hasattr(os, "symlink"):
+                                    logger.warning(f"Could not create symlink: {e}")
+                                    # Fallback: copy file
+                                    shutil.copy2(archive_path, symlink_path)
+                                    logger.info(f"Copied file to tag directory: {symlink_path}")
+                                else:
+                                    # Windows fallback: copy file
+                                    shutil.copy2(archive_path, symlink_path)
+                                    logger.info(f"Copied file to tag directory: {symlink_path}")
+                        else:
+                            logger.debug(f"Symlink already exists: {symlink_path}")
+                except Exception as e:
+                    logger.warning(f"Could not create tag folders: {e}")
+            
         except Exception as e:
             logger.warning(f"Could not archive {md_path}: {e}")
         

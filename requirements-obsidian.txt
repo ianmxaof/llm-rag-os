@@ -1,0 +1,23 @@
+# Obsidian RAG Pipeline Dependencies (Reference-Class Edition)
+# Install with: pip install -r requirements-obsidian.txt
+
+# Core dependencies
+watchdog>=3.0.0          # File watching
+pyyaml>=6.0               # YAML parsing
+lancedb>=0.4.0           # Vector DB (required, not optional)
+pyarrow>=14.0.0          # Required for LanceDB
+tantivy>=0.20.0          # Full-text search index (for BM25 hybrid search)
+fastembed>=0.2.0         # Embeddings (default, 3-6x faster than sentence-transformers)
+
+# Optional but recommended
+llmlingua>=2.0.0         # LLMLingua-2 compression (30-50% storage reduction)
+toon>=0.1.0              # TOON serialization for contexts (35-45% token savings, 2026-proof)
+fastapi>=0.104.0         # HTTP endpoint for reindexing
+uvicorn>=0.24.0          # FastAPI server
+httpx>=0.25.0            # For Ollama API calls and FastAPI client requests
+
+# Optional enhancements
+# bge-reranker-v2-m3     # Reranking (CPU-only, <100ms) - install separately if needed
+
+# Note: sqlite3 is built into Python, no installation needed
+

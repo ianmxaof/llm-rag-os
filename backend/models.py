@@ -92,6 +92,73 @@ class Prompt(Base):
     notes = Column(Text, default="")
 
 
+class Source(Base):
+    """Data source configuration table."""
+    __tablename__ = "sources"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    source_type = Column(String, nullable=False, index=True)  # rss, github, arxiv, reddit, etc.
+    name = Column(String, nullable=False)
+    config = Column(JSON, default=dict)  # Source-specific configuration
+    enabled = Column(Boolean, default=True, nullable=False)
+    last_collected = Column(DateTime, nullable=True)
+    items_collected = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SourceItem(Base):
+    """Raw items collected from sources (before refinement)."""
+    __tablename__ = "source_items"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    source_id = Column(Integer, ForeignKey("sources.id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    content = Column(Text)
+    url = Column(String, nullable=False, index=True)
+    published_at = Column(DateTime, nullable=True, index=True)
+    raw_data = Column(JSON, default=dict)  # Original item data
+    collected_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    refined = Column(Boolean, default=False, nullable=False)
+    
+    # Relationships
+    source = relationship("Source")
+
+
+class RefinedDocument(Base):
+    """Refined documents after LLM curation."""
+    __tablename__ = "refined_documents"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=True, index=True)
+    title = Column(String, nullable=False)
+    summary = Column(Text, nullable=False)
+    permanence = Column(Integer, nullable=False, index=True)  # 1-10 score
+    entities = Column(String)  # Comma-separated entities
+    tags = Column(JSON, default=list)
+    source_url = Column(String, nullable=False)
+    source = Column(String, nullable=False)
+    content = Column(Text)
+    confidence = Column(String)  # high/medium/low
+    refined_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ingested = Column(Boolean, default=False, nullable=False)
+    ingested_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    source_item = relationship("SourceItem")
+
+
+class SecretScan(Base):
+    """Secret scan results."""
+    __tablename__ = "secret_scans"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=True, index=True)
+    source_url = Column(String, nullable=False)
+    secrets_found = Column(JSON, default=list)  # List of found secrets
+    scanned_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    alerted = Column(Boolean, default=False, nullable=False)
+
+
 def init_db():
     """Initialize database tables."""
     Base.metadata.create_all(bind=engine, checkfirst=True)

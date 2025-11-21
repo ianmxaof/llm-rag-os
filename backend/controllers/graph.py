@@ -58,7 +58,19 @@ def get_nodes(
         nodes = []
         seen_docs = set()
 
-        for doc, meta in zip(results["documents"], results["metadatas"]):
+        # Check if we have any documents before iterating
+        documents = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
+        
+        if not documents or len(documents) == 0:
+            logger.info("No documents found in collection")
+            return {"nodes": []}
+        
+        if len(documents) != len(metadatas):
+            logger.warning(f"Mismatch: {len(documents)} documents but {len(metadatas)} metadatas")
+            return {"nodes": [], "error": "Mismatch between documents and metadatas"}
+
+        for doc, meta in zip(documents, metadatas):
             source = meta["source"]
             chunk_idx = meta.get("chunk", 0)
             doc_id = f"doc_{doc_hash(source)}"
@@ -68,11 +80,24 @@ def get_nodes(
             if doc_id not in seen_docs:
                 seen_docs.add(doc_id)
                 filename = source.split("/")[-1].replace(".md", "")
+                
+                # Get enriched metadata from first chunk
+                doc_title = meta.get("title", filename)
+                doc_summary = meta.get("summary", "")
+                doc_tags = meta.get("tags", [])
+                doc_quality = meta.get("quality_score", 0.7)
+                
                 nodes.append({
                     "id": doc_id,
-                    "label": filename,
+                    "label": doc_title if doc_title else filename,
                     "type": "document",
-                    "metadata": {"source": source},
+                    "metadata": {
+                        "source": source,
+                        "title": doc_title,
+                        "summary": doc_summary,
+                        "tags": doc_tags,
+                        "quality_score": doc_quality
+                    },
                     "group": "document"
                 })
 
@@ -91,6 +116,10 @@ def get_nodes(
                 if not any(t in meta_tags for t in tag_list):
                     continue
 
+            # Get enriched metadata
+            chunk_title = meta.get("title", "")
+            chunk_summary = meta.get("summary", "")
+            
             nodes.append({
                 "id": chunk_id,
                 "label": f"Chunk {chunk_idx}",
@@ -100,6 +129,8 @@ def get_nodes(
                     "chunk_index": chunk_idx,
                     "quality_score": quality,
                     "tags": meta_tags,
+                    "title": chunk_title,
+                    "summary": chunk_summary,
                     "text": (doc[:200] + "..." if len(doc) > 200 else doc)
                 },
                 "group": "chunk"
@@ -141,8 +172,15 @@ def get_edges(threshold: float = Query(0.75, ge=0.5, le=1.0)):
         for i, (src_meta, row) in enumerate(zip(metadatas, sim_matrix)):
             src_id = f"doc_{doc_hash(src_meta['source'])}_chunk_{src_meta.get('chunk', 0)}"
             
+            # Ensure row is a 1D array
+            if isinstance(row, np.ndarray):
+                row = row.flatten()
+            
             for j, score in enumerate(row):
-                if i == j or score < threshold:
+                # Convert numpy scalar to Python float to avoid array comparison issues
+                score_float = float(score)
+                
+                if i == j or score_float < threshold:
                     continue
                     
                 tgt_meta = metadatas[j]
@@ -152,8 +190,8 @@ def get_edges(threshold: float = Query(0.75, ge=0.5, le=1.0)):
                     "source": src_id,
                     "target": tgt_id,
                     "type": "similarity",
-                    "weight": float(score),
-                    "label": f"{score:.2f}"
+                    "weight": score_float,
+                    "label": f"{score_float:.2f}"
                 })
                 
                 # Cap at 1000 edges for performance

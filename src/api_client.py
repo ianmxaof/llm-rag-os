@@ -30,17 +30,21 @@ def get_llm_status() -> Dict:
 
 
 def get_ollama_status() -> Dict:
-    """Get Ollama status."""
+    """Get Ollama status by checking server directly."""
     try:
-        response = requests.get(f"{API_BASE}/ollama/status", timeout=5)
-        response.raise_for_status()
-        return response.json()
+        # Check Ollama server directly at http://localhost:11434/api/tags
+        # This checks if the server is running, not if a model is loaded
+        response = requests.get("http://localhost:11434/api/tags", timeout=5)
+        if response.status_code == 200:
+            return {"available": True, "status": "ready", "message": "Ollama server is running"}
+        else:
+            return {"available": False, "status": "not_ready", "error": f"Ollama API returned status {response.status_code}"}
     except requests.exceptions.Timeout:
-        return {"available": False, "error": "Backend request timed out. Make sure FastAPI backend is running."}
+        return {"available": False, "status": "not_ready", "error": "Ollama server timeout. Make sure Ollama is running: `ollama serve`"}
     except requests.exceptions.ConnectionError:
-        return {"available": False, "error": "Cannot connect to FastAPI backend. Start it with: python -m backend.app"}
+        return {"available": False, "status": "not_ready", "error": "Cannot connect to Ollama server. Make sure Ollama is running: `ollama serve`"}
     except Exception as e:
-        return {"available": False, "error": str(e)}
+        return {"available": False, "status": "not_ready", "error": str(e)}
 
 
 def start_lm_studio(server_mode: bool = False, model: Optional[str] = None) -> Dict:
@@ -79,6 +83,24 @@ def list_documents(limit: int = 100, offset: int = 0) -> Dict:
         return response.json()
     except Exception as e:
         return {"items": [], "total": 0, "error": str(e)}
+
+
+def get_chunks(limit: int = 1000, offset: int = 0) -> Dict:
+    """Get chunks directly from ChromaDB collection."""
+    try:
+        response = requests.get(
+            f"{API_BASE}/library/chunks",
+            params={"limit": limit, "offset": offset},
+            timeout=10
+        )
+        response.raise_for_status()
+        result = response.json()
+        # Ensure we always return a dict, never None
+        if result is None:
+            return {"chunks": [], "total": 0, "sources": 0, "error": "Empty response from backend"}
+        return result
+    except Exception as e:
+        return {"chunks": [], "total": 0, "sources": 0, "error": str(e)}
 
 
 def get_document(doc_id: int) -> Dict:
@@ -127,7 +149,10 @@ def get_umap_coords(n: int = 500) -> Dict:
     try:
         response = requests.get(f"{API_BASE}/visualize/umap", params={"n": n}, timeout=60)
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        if result is None:
+            return {"coords": [], "error": "Empty response from backend"}
+        return result
     except Exception as e:
         return {"coords": [], "error": str(e)}
 
@@ -168,7 +193,10 @@ def get_graph_nodes(tags=None, min_quality=0.0) -> Dict:
             timeout=30
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        if result is None:
+            return {"nodes": [], "error": "Empty response from backend"}
+        return result
     except Exception as e:
         return {"nodes": [], "error": str(e)}
 
@@ -182,7 +210,60 @@ def get_graph_edges(threshold=0.75) -> Dict:
             timeout=30
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        if result is None:
+            return {"edges": [], "error": "Empty response from backend"}
+        return result
     except Exception as e:
         return {"edges": [], "error": str(e)}
+
+
+def get_archived_documents(page: int = 1, search: Optional[str] = None, limit: int = 20) -> Dict:
+    """Get archived markdown files with AI summaries and tags."""
+    try:
+        params = {"page": page, "limit": limit}
+        if search:
+            params["search"] = search
+        response = requests.get(
+            f"{API_BASE}/library/archived",
+            params=params,
+            timeout=30
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result is None:
+            return {"files": [], "total": 0, "page": page, "limit": limit, "pages": 0, "error": "Empty response"}
+        return result
+    except Exception as e:
+        return {"files": [], "total": 0, "page": page, "limit": limit, "pages": 0, "error": str(e)}
+
+
+def get_tags() -> Dict:
+    """Get all tags and their file counts."""
+    try:
+        response = requests.get(f"{API_BASE}/library/tags", timeout=10)
+        response.raise_for_status()
+        result = response.json()
+        if result is None:
+            return {"tags": [], "total": 0, "error": "Empty response"}
+        return result
+    except Exception as e:
+        return {"tags": [], "total": 0, "error": str(e)}
+
+
+def get_files_by_tag(tag: str, page: int = 1, limit: int = 20) -> Dict:
+    """Get files for a specific tag."""
+    try:
+        response = requests.get(
+            f"{API_BASE}/library/tag/{tag}",
+            params={"page": page, "limit": limit},
+            timeout=10
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result is None:
+            return {"files": [], "total": 0, "page": page, "limit": limit, "pages": 0, "error": "Empty response"}
+        return result
+    except Exception as e:
+        return {"files": [], "total": 0, "page": page, "limit": limit, "pages": 0, "error": str(e)}
 

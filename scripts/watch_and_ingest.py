@@ -158,13 +158,18 @@ def categorize_by_keywords(text: str) -> str:
 
 
 def move_to_category(md_path: Path, category: str) -> Path:
-    """Move converted markdown to categorized subfolder."""
-    category_dir = KNOWLEDGE_DIR / category
-    category_dir.mkdir(parents=True, exist_ok=True)
-    dest = category_dir / md_path.name
+    """Move converted markdown into the Obsidian vault Auto folder.
+
+    Instead of routing to category-specific folders, this centralizes
+    processed markdown in knowledge/notes/Auto/ so Obsidian and the RAG
+    system share the same processed corpus.
+    """
+    auto_dir = KNOWLEDGE_DIR / "notes" / "Auto"
+    auto_dir.mkdir(parents=True, exist_ok=True)
+    dest = auto_dir / md_path.name
     if dest.exists():
         # Add timestamp to avoid conflicts
-        dest = category_dir / f"{md_path.stem}_{int(time.time())}{md_path.suffix}"
+        dest = auto_dir / f"{md_path.stem}_{int(time.time())}{md_path.suffix}"
     shutil.move(str(md_path), str(dest))
     return dest
 

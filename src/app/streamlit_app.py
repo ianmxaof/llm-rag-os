@@ -1,11 +1,14 @@
 import os
 import sys
 import time
+import logging
 from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
 import webbrowser
+
+logger = logging.getLogger(__name__)
 
 # Add parent directory to path so we can import from src
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -13,9 +16,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src import rag_utils
 from src.api_client import (
     check_backend_available, get_llm_status, start_lm_studio, stop_lm_studio,
-    get_ollama_status, list_documents, get_document, update_document_metadata, 
+    get_ollama_status, list_documents, get_chunks, get_document, update_document_metadata, 
     run_ingestion, ingest_file, get_umap_coords, get_corpus_stats,
-    get_graph_nodes, get_graph_edges
+    get_graph_nodes, get_graph_edges, get_archived_documents, get_tags, get_files_by_tag
 )
 from scripts.config import config
 import psutil
@@ -83,16 +86,18 @@ with tabs[0]:
 # Chat Tab (existing functionality)
 with tabs[1]:
     st.header("Chat")
-    st.caption("Query your local knowledge base. Make sure the Mistral server (LM Studio / llama.cpp) is running.")
+    st.caption("Query your local knowledge base. Make sure Ollama is running: `ollama serve`")
     
     with st.sidebar:
         st.header("Settings")
         top_k = st.slider("Top-K context chunks", min_value=1, max_value=10, value=rag_utils.DEFAULT_K)
         show_context = st.checkbox("Show retrieved context", value=False)
-        st.markdown("**Model endpoint:**")
-        st.code(os.getenv("LOCAL_MODEL_URL", "http://127.0.0.1:1234/v1/chat/completions"), language="bash")
+        st.markdown("**Chat model:**")
+        st.code(config.OLLAMA_CHAT_MODEL, language="bash")
         st.markdown("**Embedding model:**")
-        st.code(rag_utils.EMBED_MODEL_NAME, language="bash")
+        st.code(config.OLLAMA_EMBED_MODEL, language="bash")
+        st.markdown("**Ollama API:**")
+        st.code(config.OLLAMA_API_BASE, language="bash")
     
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
@@ -101,11 +106,19 @@ with tabs[1]:
     
     if question:
         with st.spinner("Thinking..."):
-            answer, metas, context = rag_utils.answer_question(question, k=top_k)
-            sources = rag_utils.format_sources(metas)
-        st.session_state.chat_history.append(
-            {"question": question, "answer": answer, "sources": sources, "context": context}
-        )
+            try:
+                answer, metas, context = rag_utils.answer_question(question, k=top_k)
+                sources = rag_utils.format_sources(metas)
+                st.session_state.chat_history.append(
+                    {"question": question, "answer": answer, "sources": sources, "context": context}
+                )
+            except Exception as e:
+                error_msg = str(e)
+                if "dimension" in error_msg.lower():
+                    st.error(f"Embedding dimension mismatch: {error_msg}\n\n**Solution:** The ChromaDB collection was created with a different embedding model. Please delete the collection and re-ingest your documents, or ensure you're using the same embedding model for queries as was used during ingestion.")
+                else:
+                    st.error(f"Error answering question: {error_msg}")
+                logger.error(f"Error in answer_question: {e}", exc_info=True)
     
     for entry in reversed(st.session_state.chat_history):
         st.markdown(f"**You:** {entry['question']}")
@@ -124,33 +137,184 @@ with tabs[2]:
     st.header("Library")
     
     if backend_available:
+        # View switcher
+        view_mode = st.radio(
+            "View Mode",
+            ["Chunks View", "Archive View"],
+            horizontal=True,
+            key="library_view_mode"
+        )
+        
         if st.button("Refresh Library"):
-            st.session_state.library_data = list_documents(limit=100)
+            st.session_state.library_chunks_data = None
+            st.session_state.library_archive_data = None
+            st.session_state.library_tags_data = None
         
-        if "library_data" not in st.session_state:
-            st.session_state.library_data = list_documents(limit=100)
-        
-        data = st.session_state.library_data
-        
-        if "error" in data:
-            st.error(f"Error loading library: {data['error']}")
-        else:
-            st.metric("Total Documents", data.get("total", 0))
+        if view_mode == "Chunks View":
+            # Existing chunks view
+            if "library_chunks_data" not in st.session_state:
+                try:
+                    st.session_state.library_chunks_data = get_chunks(limit=1000)
+                except Exception as e:
+                    logger.error(f"Error loading library chunks: {e}", exc_info=True)
+                    st.session_state.library_chunks_data = {
+                        "chunks": [],
+                        "total": 0,
+                        "sources": 0,
+                        "error": f"Failed to load library data: {str(e)}"
+                    }
             
-            for item in data.get("items", []):
-                with st.expander(f"{item.get('source_path', 'Unknown')} (v{item.get('ingest_version', 1)})"):
-                    st.write(f"**Status:** {item.get('status', 'unknown')}")
-                    st.write(f"**Tags:** {', '.join(item.get('tags', []))}")
-                    st.write(f"**Notes:** {item.get('notes', '')}")
+            data = st.session_state.library_chunks_data
+            
+            # Ensure data is not None before checking for errors
+            if data is None:
+                data = {"chunks": [], "total": 0, "sources": 0, "error": "Failed to load library data"}
+                st.session_state.library_chunks_data = data
+            
+            if "error" in data:
+                error_msg = data['error']
+                st.error(f"Error loading library: {error_msg}")
+                
+                # Provide helpful guidance for dimension mismatch
+                if "dimension" in error_msg.lower() or "Collection" in error_msg:
+                    st.info("💡 **Tip:** If you see dimension mismatch errors, you may need to delete the ChromaDB collection and re-ingest your documents. The collection path is in the error message above.")
+            else:
+                total_chunks = data.get("total", 0)
+                sources = data.get("sources", 0)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Total Chunks", total_chunks)
+                with col2:
+                    st.metric("Source Documents", sources)
+                
+                if total_chunks == 0:
+                    st.info("No chunks found. Ingest some documents first!")
+                else:
+                    # Group chunks by source for display
+                    chunks_by_source = {}
+                    for chunk in data.get("chunks", []):
+                        source = chunk.get("source", "unknown")
+                        if source not in chunks_by_source:
+                            chunks_by_source[source] = []
+                        chunks_by_source[source].append(chunk)
                     
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button(f"View Details", key=f"view_{item['id']}"):
-                            st.session_state.selected_doc_id = item['id']
-                    with col2:
-                        if st.button(f"Open in Cursor", key=f"open_{item['id']}"):
-                            # TODO: Implement open in Cursor
-                            st.info("Open in Cursor functionality coming soon")
+                    # Display chunks grouped by source
+                    for source, chunks in chunks_by_source.items():
+                        filename = source.split("/")[-1] if "/" in source else source
+                        with st.expander(f"📄 {filename} ({len(chunks)} chunks)"):
+                            for chunk in chunks:
+                                chunk_idx = chunk.get("chunk_index", 0)
+                                text_preview = chunk.get("text_preview", "")
+                                text_length = chunk.get("text_length", 0)
+                                
+                                st.markdown(f"**Chunk {chunk_idx}** ({text_length} chars)")
+                                st.code(text_preview, language="markdown")
+                                st.markdown("---")
+        
+        else:  # Archive View
+            # Archive view with AI summaries and tags
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                search_term = st.text_input("Search archived files", key="archive_search", placeholder="Enter filename...")
+            with col2:
+                page_size = st.selectbox("Files per page", [10, 20, 50], index=1, key="archive_page_size")
+            
+            # Initialize session state
+            if "library_archive_page" not in st.session_state:
+                st.session_state.library_archive_page = 1
+            
+            # Get archived documents
+            archive_data = get_archived_documents(
+                page=st.session_state.library_archive_page,
+                search=search_term if search_term else None,
+                limit=page_size
+            )
+            
+            if "error" in archive_data:
+                st.error(f"Error loading archive: {archive_data['error']}")
+            else:
+                total_files = archive_data.get("total", 0)
+                files = archive_data.get("files", [])
+                pages = archive_data.get("pages", 1)
+                
+                st.metric("Archived Files", total_files)
+                
+                if total_files == 0:
+                    st.info("No archived files found. Ingest some documents first!")
+                else:
+                    # Pagination controls
+                    if pages > 1:
+                        col1, col2, col3 = st.columns([1, 2, 1])
+                        with col1:
+                            if st.button("◀ Previous", disabled=st.session_state.library_archive_page <= 1):
+                                st.session_state.library_archive_page -= 1
+                                st.rerun()
+                        with col2:
+                            st.write(f"Page {st.session_state.library_archive_page} of {pages}")
+                        with col3:
+                            if st.button("Next ▶", disabled=st.session_state.library_archive_page >= pages):
+                                st.session_state.library_archive_page += 1
+                                st.rerun()
+                    
+                    # Display files
+                    for file_info in files:
+                        with st.container():
+                            col1, col2 = st.columns([4, 1])
+                            with col1:
+                                st.markdown(f"### 📄 {file_info['name']}")
+                                
+                                # File metadata
+                                file_size_kb = file_info['size'] / 1024
+                                modified_date = file_info.get('modified', '')[:10] if file_info.get('modified') else 'Unknown'
+                                st.caption(f"Size: {file_size_kb:.1f} KB | Modified: {modified_date}")
+                                
+                                # AI Summary badge
+                                if file_info.get('ai_summary'):
+                                    st.info(f"**Summary:** {file_info['ai_summary']}")
+                                
+                                # AI Tags as chips
+                                if file_info.get('ai_tags'):
+                                    tag_cols = st.columns(min(len(file_info['ai_tags']), 5))
+                                    for idx, tag in enumerate(file_info['ai_tags'][:5]):
+                                        with tag_cols[idx % 5]:
+                                            st.chip(tag)
+                                
+                                # Preview
+                                if file_info.get('preview'):
+                                    with st.expander("Preview"):
+                                        st.code(file_info['preview'], language="markdown")
+                            
+                            with col2:
+                                file_path = file_info['path']
+                                
+                                # Open in Cursor button
+                                if st.button("📝 Open in Cursor", key=f"open_{file_info['name']}"):
+                                    import webbrowser
+                                    import os
+                                    # Use cursor:// protocol or file://
+                                    cursor_url = f"cursor://file/{os.path.abspath(file_path)}"
+                                    try:
+                                        webbrowser.open(cursor_url)
+                                        st.success("Opening in Cursor...")
+                                    except Exception as e:
+                                        # Fallback: open file location
+                                        webbrowser.open(f"file://{os.path.dirname(os.path.abspath(file_path))}")
+                                        st.info(f"Opened file location. Error: {e}")
+                                
+                                # Re-ingest button
+                                if st.button("🔄 Re-ingest", key=f"reingest_{file_info['name']}"):
+                                    with st.spinner("Re-ingesting..."):
+                                        result = ingest_file(file_path)
+                                        if result.get("success"):
+                                            st.success("Re-ingested successfully!")
+                                            # Clear graph cache to trigger refresh
+                                            if "graph_data" in st.session_state:
+                                                st.session_state.graph_data = None
+                                        else:
+                                            st.error(f"Re-ingest failed: {result.get('message', 'Unknown error')}")
+                            
+                            st.divider()
     else:
         st.warning("Backend not available. Start the FastAPI backend to use the Library.")
 
@@ -192,6 +356,10 @@ with tabs[3]:
                         "ram_after": ram_after,
                         "ram_freed": ram_freed
                     }
+                    
+                    # Clear graph cache to trigger refresh
+                    if "graph_data" in st.session_state:
+                        st.session_state.graph_data = None
                 else:
                     st.session_state.ingest_status = {
                         "stage": "error",
@@ -288,7 +456,10 @@ with tabs[3]:
                         st.caption(f"{size_str} • {time.strftime('%m/%d %I:%M %p', time.localtime(file.stat().st_mtime))}")
                     with col3:
                         if st.button("Ingest", key=f"ingest_{file.name}", use_container_width=True):
-                            trigger_ingest(file)
+                            result = trigger_ingest(file)
+                            # Clear graph cache to trigger refresh
+                            if "graph_data" in st.session_state:
+                                st.session_state.graph_data = None
                             st.rerun()
         else:
             st.info("No .md files found in inbox/. Upload a file above or add files to the inbox directory.")
@@ -328,7 +499,12 @@ with tabs[3]:
             if file_path:
                 file_obj = Path(file_path)
                 if file_obj.exists() and file_obj.suffix.lower() == ".md":
-                    trigger_ingest(file_obj)
+                    result = trigger_ingest(file_obj)
+                    # Clear graph cache to trigger refresh
+                    if "graph_data" in st.session_state:
+                        st.session_state.graph_data = None
+                    if result:
+                        st.success("Ingestion complete! Graph will refresh automatically.")
                     st.rerun()
                 else:
                     st.error("File does not exist or is not a .md file")
@@ -364,6 +540,10 @@ with tabs[4]:
         if st.button("Generate UMAP Visualization"):
             with st.spinner("Computing UMAP coordinates..."):
                 result = get_umap_coords(n=n_samples)
+                
+                # Ensure result is not None before checking for errors
+                if result is None:
+                    result = {"coords": [], "error": "Failed to compute UMAP coordinates"}
                 
                 if "error" in result:
                     st.error(f"Error: {result['error']}")
@@ -464,6 +644,12 @@ with tabs[5]:
                         nodes_data = get_graph_nodes(tags=tags, min_quality=min_quality)
                         edges_data = get_graph_edges(threshold=threshold)
                         
+                        # Ensure data is not None before checking for errors
+                        if nodes_data is None:
+                            nodes_data = {"nodes": [], "error": "Failed to load graph nodes"}
+                        if edges_data is None:
+                            edges_data = {"edges": [], "error": "Failed to load graph edges"}
+                        
                         if "error" in nodes_data or "error" in edges_data:
                             st.error(f"Error loading graph: {nodes_data.get('error') or edges_data.get('error')}")
                         else:
@@ -506,12 +692,34 @@ with tabs[5]:
                             color = "#00ff41"
                             size = 25
                             shape = "box"
+                            
+                            # Build enriched tooltip for document nodes
+                            metadata = node.get("metadata", {})
+                            tooltip_parts = [node["label"]]
+                            if metadata.get("summary"):
+                                tooltip_parts.append(f"\nSummary: {metadata['summary']}")
+                            if metadata.get("tags"):
+                                tags_str = ", ".join(metadata["tags"][:3]) if isinstance(metadata["tags"], list) else str(metadata["tags"])
+                                tooltip_parts.append(f"\nTags: {tags_str}")
+                            if metadata.get("quality_score"):
+                                tooltip_parts.append(f"\nQuality: {metadata['quality_score']}/10")
+                            title = "\n".join(tooltip_parts)
                         else:  # chunk
                             color = "#00aaff"
                             size = 15
                             shape = "dot"
+                            
+                            # Build enriched tooltip for chunk nodes
+                            metadata = node.get("metadata", {})
+                            tooltip_parts = [f"Chunk {metadata.get('chunk_index', 0)}"]
+                            if metadata.get("text"):
+                                text_preview = metadata["text"][:150] + "..." if len(metadata["text"]) > 150 else metadata["text"]
+                                tooltip_parts.append(f"\n{text_preview}")
+                            if metadata.get("tags"):
+                                tags_str = ", ".join(metadata["tags"][:3]) if isinstance(metadata["tags"], list) else str(metadata["tags"])
+                                tooltip_parts.append(f"\nTags: {tags_str}")
+                            title = "\n".join(tooltip_parts)
                         
-                        title = node["metadata"].get("text", node["label"])
                         net.add_node(
                             node["id"],
                             label=node["label"],

@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.controllers import llm, ingest, library, visualize, prompts, ollama, graph
+from backend.controllers import sources, refinement, queue, alerts
 from backend.models import init_db
 
 # Configure logging
@@ -47,6 +48,12 @@ app.include_router(library.router, prefix="/library", tags=["Library"])
 app.include_router(visualize.router, prefix="/visualize", tags=["Visualization"])
 app.include_router(prompts.router, prefix="/prompts", tags=["Prompts"])
 app.include_router(graph.router)  # Router already has /graph prefix
+
+# Intelligence OS routers
+app.include_router(sources.router)
+app.include_router(refinement.router)
+app.include_router(queue.router)
+app.include_router(alerts.router)
 
 
 @app.post("/open/cursor")

@@ -33,29 +33,75 @@ def compute_umap_sample(n: int = 1000) -> List[Dict]:
     
     try:
         client = chromadb.PersistentClient(path=str(config.VECTOR_DIR))
-        collection = client.get_collection(config.COLLECTION_NAME)
+        
+        # Check if collection exists
+        try:
+            collection = client.get_collection(config.COLLECTION_NAME)
+        except Exception as e:
+            logger.error(f"Collection {config.COLLECTION_NAME} does not exist: {e}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Collection '{config.COLLECTION_NAME}' does not exist. Ingest some documents first."
+            )
+        
+        # Check collection count
+        try:
+            count = collection.count()
+            if count == 0:
+                logger.info("Collection is empty")
+                return []
+        except Exception as e:
+            logger.warning(f"Could not get collection count: {e}")
         
         # Get all embeddings (this may be memory-intensive for large collections)
         # For now, we'll get a sample
-        results = collection.get(limit=n, include=["embeddings", "metadatas", "documents"])
+        try:
+            results = collection.get(limit=n, include=["embeddings", "metadatas", "documents"])
+        except Exception as e:
+            logger.error(f"Error getting embeddings from collection: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error querying collection: {str(e)}"
+            )
         
         embeddings = results.get("embeddings", [])
         metadatas = results.get("metadatas", [])
         documents = results.get("documents", [])
         
-        if not embeddings:
+        # Check if we have any embeddings before processing
+        if not embeddings or len(embeddings) == 0:
+            logger.info("No embeddings found in collection")
             return []
         
         # Convert to numpy array
         X = np.array(embeddings)
         
+        # Check numpy array size (can't use truthiness check on numpy arrays)
+        if X.size == 0:
+            logger.info("Empty embeddings array after conversion")
+            return []
+        
+        # Ensure we have at least n_neighbors samples for UMAP
+        if len(embeddings) < 15:
+            logger.warning(f"Only {len(embeddings)} embeddings found, but UMAP needs at least 15. Returning empty result.")
+            return []
+        
         # Compute UMAP
-        reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
-        coords = reducer.fit_transform(X)
+        try:
+            reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=min(15, len(embeddings) - 1), min_dist=0.1)
+            coords = reducer.fit_transform(X)
+        except Exception as umap_error:
+            logger.error(f"UMAP fit_transform failed: {umap_error}")
+            raise HTTPException(status_code=500, detail=f"UMAP computation failed: {str(umap_error)}")
         
         # Build result list
         result = []
-        for i, (coord, meta, doc) in enumerate(zip(coords, metadatas, documents)):
+        # Ensure all arrays have the same length
+        min_len = min(len(coords), len(metadatas), len(documents))
+        for i in range(min_len):
+            coord = coords[i]
+            meta = metadatas[i] if i < len(metadatas) else {}
+            doc = documents[i] if i < len(documents) else ""
             result.append({
                 "x": float(coord[0]),
                 "y": float(coord[1]),

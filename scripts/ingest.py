@@ -54,6 +54,21 @@ VECTOR_DIR = config.VECTOR_DIR
 MODEL_NAME = config.EMBED_MODEL
 SUPPORTED_EXTS = config.SUPPORTED_EXTS
 
+# Obsidian system-folder skipping helper (added by Obsidian+RAG integration)
+SKIP_FOLDERS = {".obsidian", "_attachments", "_dashboard"}
+
+def should_skip(name: str) -> bool:
+    """
+    Return True for folders the ingestion walker should skip.
+    - Explicitly skip known Obsidian system folders
+    - Skip any folder starting with '_' except '_templates'
+    """
+    if name in SKIP_FOLDERS:
+        return True
+    if name.startswith("_") and name != "_templates":
+        return True
+    return False
+
 
 def load_sources(extra_sources: Iterable[Path | str] | None = None) -> List[Path]:
     sources: List[Path] = []
@@ -207,8 +222,10 @@ def _normalize_single_file(
 ) -> Tuple[Path, Optional[Path], Optional[Exception]]:
     """Normalize a single file, returning (source_path, output_path, error)."""
     try:
-        rel_dir = KNOWLEDGE_DIR / safe_relative_path(src, path.parent)
-        out_path = normalize_to_markdown(path, rel_dir, use_fast=use_fast)
+        # Route all normalized markdown into the Obsidian vault Auto folder
+        auto_dir = KNOWLEDGE_DIR / "notes" / "Auto"
+        auto_dir.mkdir(parents=True, exist_ok=True)
+        out_path = normalize_to_markdown(path, auto_dir, use_fast=use_fast)
         return path, out_path, None
     except Exception as exc:
         return path, None, exc
@@ -240,6 +257,10 @@ def ingest_sources(
             if not path.is_file():
                 continue
             if path.suffix.lower() not in SUPPORTED_EXTS:
+                continue
+            # Skip files in Obsidian system folders
+            path_parts = path.parts
+            if any(should_skip(part) for part in path_parts):
                 continue
             files_to_process.append((path, src))
 

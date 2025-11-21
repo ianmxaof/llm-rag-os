@@ -307,21 +307,16 @@ async def startup_pull_model():
 
 @router.get("/status")
 def get_status():
-    """Get Ollama service status."""
+    """Get Ollama service status - checks server availability, not model availability."""
     try:
-        if not is_ollama_running():
-            return {
-                "available": False,
-                "error": "Ollama server is not running or not reachable",
-                "api_url": config.OLLAMA_API_BASE
-            }
+        # Check if Ollama server is running by hitting /tags endpoint
+        # Don't check for loaded models - that's dynamic and misleading
         response = requests.get(f"{config.OLLAMA_API_BASE}/tags", timeout=5)
         if response.status_code == 200:
-            models = response.json().get("models", [])
             return {
                 "available": True,
                 "api_url": config.OLLAMA_API_BASE,
-                "loaded_models": [m["name"] for m in models],
+                "message": "Ollama server is running",
                 "embed_model": config.OLLAMA_EMBED_MODEL,
                 "chat_model": config.OLLAMA_CHAT_MODEL
             }
@@ -331,13 +326,13 @@ def get_status():
                 "error": f"Ollama API returned status {response.status_code}",
                 "api_url": config.OLLAMA_API_BASE
             }
-    except requests.exceptions.Timeout as e:
+    except requests.exceptions.Timeout:
         return {
             "available": False,
             "error": f"Connection to Ollama timed out at {config.OLLAMA_API_BASE}. Make sure Ollama is running: `ollama serve`",
             "api_url": config.OLLAMA_API_BASE
         }
-    except requests.exceptions.ConnectionError as e:
+    except requests.exceptions.ConnectionError:
         return {
             "available": False,
             "error": f"Cannot connect to Ollama at {config.OLLAMA_API_BASE}. Make sure Ollama is running: `ollama serve`",
