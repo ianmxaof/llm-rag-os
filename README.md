@@ -1,198 +1,694 @@
-# LLM RAG OS - Local RAG Operating System
+# llm-rag — Unified Local RAG + Intelligence OS + Obsidian Integration
 
-A private, local RAG (Retrieval-Augmented Generation) system powered by Ollama. Build your own knowledge base with automatic model management, document refinement, and corpus visualization.
+A modular local-first Retrieval-Augmented Generation (RAG) system integrating:
+
+- **Multi-source automated knowledge ingestion** (GitHub, RSS, arXiv, Reddit, local files)
+- **Local embeddings** (Ollama + fastembed)
+- **Document + prompt vector stores** (ChromaDB + LanceDB)
+- **Obsidian vault sync & ingestion** (Reference-class pipeline)
+- **End-to-end refinement pipeline** (LLM-powered content enhancement)
+- **FastAPI backend** (RESTful API)
+- **Streamlit UI** (Web interface)
+- **Multi-LLM chain** (embedding / refinement / chat)
+
+This README provides complete setup instructions, including cloning, environment preparation, API keys, model setup, vector store initialization, ingestion operations, and how to run the full system.
+
+---
+
+## Table of Contents
+
+1. [Features](#features)
+2. [Architecture Overview](#architecture-overview)
+3. [Prerequisites](#prerequisites)
+4. [Installation](#installation)
+5. [Environment Variables & API Keys](#environment-variables--api-keys)
+6. [Model Setup (Ollama)](#model-setup-ollama)
+7. [Running the System](#running-the-system)
+8. [Folder Structure](#folder-structure)
+9. [Using the RAG System](#using-the-rag-system)
+10. [Ingestion Pipelines](#ingestion-pipelines)
+11. [Obsidian Integration](#obsidian-integration)
+12. [Prompt RAG (Prompt Intelligence Layer)](#prompt-rag-prompt-intelligence-layer)
+13. [Intelligence OS Components](#intelligence-os-components)
+14. [Troubleshooting](#troubleshooting)
+
+---
 
 ## Features
 
-- **Ollama Integration**: Clean, programmatic model loading/unloading (no GUI hacks)
-- **Auto-Unload**: Models automatically unload after embedding to free RAM
-- **Fast Ingestion**: Batch and single-file ingestion with Ollama embeddings
-- **Streamlit GUI**: Beautiful web interface for managing your RAG pipeline
-- **FastAPI Backend**: RESTful API for programmatic control
-- **ChromaDB**: Vector store for semantic search
-- **Docker Support**: Containerized deployment ready
-- **CI/CD**: GitHub Actions for automated testing
+### ✔ Local Embeddings, Chat, and Refinement
 
-## Quick Start
+Uses **Ollama** for:
+- `nomic-embed-text` (embeddings)
+- `mistral` (chat)
+- Your choice of LLM for refinement (Ollama or Anthropic/OpenAI)
 
-### Prerequisites
+**fastembed** integration for 3-6x faster embeddings (optional, recommended)
 
-- Python 3.11+
-- [Ollama](https://ollama.com) installed and running
-- Git
+### ✔ Multi-Source Ingestion
 
-### Installation
+Pulls content from:
+- **GitHub** (repositories, issues, discussions)
+- **RSS feeds** (blogs, news, updates)
+- **arXiv** (research papers)
+- **Reddit** (subreddits, discussions)
+- **Local file drops** (PDFs, markdown, text files)
+- **Obsidian vault** (watch folders with automatic sync)
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/llm-rag-os.git
-   cd llm-rag-os
-   ```
+### ✔ Vector Database Stack
 
-2. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+- **ChromaDB** — documents (primary vector store)
+- **LanceDB** — prompts + Obsidian notes (hybrid BM25+vector search)
+- **SQLite** — ingestion ledger (deduplication)
 
-3. **Install and start Ollama**
-   ```bash
-   # Windows
-   winget install ollama
-   
-   # macOS
-   brew install ollama
-   
-   # Linux
-   curl -fsSL https://ollama.com/install.sh | sh
-   
-   # Start Ollama service
-   ollama serve
-   ```
+### ✔ Automated Pre-Pipeline
 
-4. **Pull required models**
-   ```bash
-   ollama pull nomic-embed-text           # For embeddings
-   ollama pull mistral:7b-instruct-q5_K_M # For chat (optional)
-   ```
+- Preprocessing (text extraction, normalization)
+- Chunking (semantic heading-based chunking)
+- Embedding (Ollama or fastembed)
+- Deduplication (SQLite ledger)
+- Refinement (LLM-powered content enhancement)
+- Secret scanning (TruffleHog integration)
 
-5. **Start the backend**
-   ```bash
-   # Windows
-   scripts\run_backend.bat
-   
-   # Linux/macOS
-   ./scripts/run_backend.sh
-   
-   # Or manually
-   uvicorn backend.app:app --reload
-   ```
+### ✔ Frontend / Backend
 
-6. **Start the Streamlit GUI** (in a new terminal)
-   ```bash
-   streamlit run src/app/streamlit_app.py
-   ```
+- **FastAPI REST API** (comprehensive endpoints)
+- **Streamlit UI** (beautiful web interface)
 
-7. **Open your browser**
-   - Streamlit: http://localhost:8501
-   - FastAPI docs: http://localhost:8000/docs
+### ✔ Reference-Class Obsidian Integration
 
-## Usage
+- Metadata-aware chunking by headings
+- YAML frontmatter extraction with graceful fallback
+- SQLite ingestion ledger for 100% correct deduplication
+- Pre-computed chunk summaries via Ollama
+- obsidian:// deep link generation
+- Separate curated/raw collections
 
-### Single File Ingestion
+---
 
-1. Place a `.md` file in `knowledge/inbox/`
-2. Open Streamlit → Ingest tab
-3. Click "Embed Now (Load → Embed → Unload)"
-4. Model loads, embeds, and unloads automatically
+## Architecture Overview
 
-### Batch Ingestion
-
-1. Place files in `knowledge/inbox/`
-2. Use the batch ingestion feature in Streamlit
-3. Or run via API:
-   ```bash
-   curl -X POST "http://localhost:8000/ingest/run?path=knowledge/inbox&fast=true&parallel=true"
-   ```
-
-### API Usage
-
-```python
-import requests
-
-# Check Ollama status
-response = requests.get("http://localhost:8000/ollama/status")
-print(response.json())
-
-# Ingest a file
-response = requests.post(
-    "http://localhost:8000/ingest/file",
-    json={"path": "knowledge/inbox/myfile.md"}
-)
-print(response.json())
-
-# Query your knowledge base
-response = requests.get("http://localhost:8000/library/list")
-print(response.json())
+```
+External Sources → Collectors → Ingestion Queue → Refinement → Vector Stores → Query Pipeline → LLM Response
 ```
 
-## Docker Deployment
+**Data Plane:**
+- Collectors (GitHub, RSS, arXiv, Reddit)
+- Ingestion pipeline (preprocess → chunk → embed → store)
+- Vector stores (ChromaDB, LanceDB)
+- SQLite ledger (deduplication)
 
-### Build and run with Docker Compose
+**Control Plane:**
+- FastAPI backend (orchestration)
+- Queue management (priority, scheduling)
+- Refinement service (LLM-powered enhancement)
+- Secret scanning (TruffleHog)
+
+**Infrastructure Plane:**
+- Ollama (local LLM inference)
+- Streamlit UI (user interface)
+- File watchers (Obsidian, inbox)
+
+---
+
+## Prerequisites
+
+### System Requirements
+
+- **Python 3.10+**
+- **Git**
+- **Pip + venv**
+- **8–16 GB RAM** recommended for local models
+- **Obsidian** (optional, for vault integration)
+
+### Software Requirements
+
+| Required | Purpose |
+|----------|---------|
+| Ollama | Embeddings + local LLM chat |
+| Python 3.10+ | Runtime |
+| ChromaDB | Document store |
+| LanceDB | Prompt + Obsidian storage (optional) |
+| SQLite3 | Ledger (built-in Python) |
+
+---
+
+## Installation
+
+### 1. Clone the Repository
 
 ```bash
-docker-compose up --build
+git clone https://github.com/ianmxaof/llm-rag-os.git
+cd llm-rag-os
 ```
 
-This will:
-- Start Ollama service
-- Start FastAPI backend (port 8000)
-- Start Streamlit GUI (port 8501)
-
-### Build Docker image manually
+### 2. Create a Python Virtual Environment
 
 ```bash
-docker build -t rag-os:v0.1 .
-docker run -p 8000:8000 -p 8501:8501 -p 11434:11434 rag-os:v0.1
+python -m venv venv
+
+# macOS/Linux
+source venv/bin/activate
+
+# Windows
+venv\Scripts\activate
 ```
 
-## Project Structure
-
-```
-llm-rag-os/
-├── backend/              # FastAPI backend
-│   ├── controllers/     # API route handlers
-│   │   ├── ollama.py   # Ollama integration
-│   │   ├── ingest.py   # Ingestion endpoints
-│   │   └── ...
-│   ├── models.py        # Database models
-│   └── app.py          # FastAPI app
-├── scripts/             # Utility scripts
-│   ├── embed_worker.py  # Background embedding worker
-│   ├── preprocess.py    # Text preprocessing
-│   └── config.py       # Configuration
-├── src/                 # Client utilities
-│   ├── api_client.py   # FastAPI client
-│   └── rag_utils.py    # RAG utilities
-├── tests/              # Test suite
-│   └── smoke_test.py   # Smoke tests
-├── knowledge/          # Knowledge base (gitignored)
-│   ├── inbox/          # Drop files here
-│   ├── processed/      # Processed files
-│   └── archived/      # Archived files
-├── chroma/             # Vector store (gitignored)
-├── src/
-│   ├── app/
-│   │   └── streamlit_app.py  # Streamlit GUI
-│   └── ...                   # Other source modules
-├── Dockerfile          # Docker configuration
-├── docker-compose.yml  # Docker Compose config
-└── requirements.txt    # Python dependencies
-```
-
-## Configuration
-
-Environment variables (optional, defaults provided):
+### 3. Install Python Dependencies
 
 ```bash
-# Ollama settings
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Optional: Install Obsidian RAG dependencies
+pip install -r requirements-obsidian.txt
+```
+
+### 4. Install TruffleHog (Optional but Recommended)
+
+```bash
+pip install trufflehog
+```
+
+---
+
+## Environment Variables & API Keys
+
+Create a `.env` file in the root:
+
+```bash
+# --- Optional External APIs ---
+GITHUB_TOKEN=<pat>              # For collectors + crawling
+REDDIT_CLIENT_ID=<id>
+REDDIT_SECRET=<secret>
+REDDIT_USER_AGENT=llmrag/1.0
+ARXIV_EMAIL=<your-email>
+HF_API_KEY=<huggingface-key>
+
+# --- LLM Providers (optional if not using external refinement) ---
+ANTHROPIC_API_KEY=<anthropic-key>
+OPENAI_API_KEY=<openai-key>
+
+# --- Local paths ---
+OBSIDIAN_VAULT_PATH=/absolute/path/to/ObsidianVault
+WATCH_FOLDER_MANUAL=./watch/Manual
+WATCH_FOLDER_AUTO=./watch/Auto
+
+# --- Ollama settings (optional, defaults provided) ---
 OLLAMA_API_BASE=http://localhost:11434/api
 OLLAMA_EMBED_MODEL=nomic-embed-text
 OLLAMA_CHAT_MODEL=mistral:7b-instruct-q5_K_M
 
-# Embedding settings
+# --- Embedding settings (optional) ---
 EMBED_MODEL_NAME=BAAI/bge-small-en-v1.5
 CHUNK_SIZE=1500
 CHUNK_OVERLAP=200
 
-# Vector store
+# --- Vector store (optional) ---
 COLLECTION_NAME=llm_docs
 ```
+
+**Where to get the keys:**
+
+| Service | Where to generate keys |
+|---------|------------------------|
+| GitHub PAT | GitHub → Settings → Developer Settings → Personal Access Tokens |
+| Reddit API | https://www.reddit.com/prefs/apps |
+| HuggingFace API Key | https://huggingface.co/settings/tokens |
+| Anthropic | https://console.anthropic.com |
+| OpenAI | https://platform.openai.com/api-keys |
+
+---
+
+## Model Setup (Ollama)
+
+### Install Ollama
+
+Download and install from: https://ollama.com/download
+
+### Pull Required Models
+
+```bash
+# Required for embeddings
+ollama pull nomic-embed-text
+
+# Required for chat
+ollama pull mistral
+
+# Optional: For refinement
+ollama pull llama3.1:latest
+```
+
+(If you use Anthropic or OpenAI for refinement instead of local refinement, skip refinement model pulls.)
+
+---
+
+## Running the System
+
+### 1. Start the FastAPI Backend
+
+```bash
+# Windows
+scripts\run_backend.bat
+
+# Linux/macOS
+./scripts/run_backend.sh
+
+# Or manually
+uvicorn backend.app:app --reload --port 8000
+```
+
+### 2. Start the Streamlit UI
+
+```bash
+streamlit run src/app/streamlit_app.py
+```
+
+UI should launch at: **http://localhost:8501**
+
+### 3. (Optional) Start File Watchers
+
+```bash
+# Start Obsidian watcher
+python scripts/obsidian_rag_ingester.py
+
+# Start inbox watcher
+python scripts/watch_and_ingest.py
+```
+
+---
+
+## Folder Structure
+
+```
+llm-rag-os/
+│
+├── backend/                    # FastAPI backend
+│   ├── app.py                 # FastAPI application
+│   ├── models.py              # Database models
+│   ├── controllers/          # API route handlers
+│   │   ├── ollama.py         # Ollama integration
+│   │   ├── ingest.py         # Ingestion endpoints
+│   │   ├── prompts.py        # Prompt RAG endpoints
+│   │   ├── alerts.py         # Alert system
+│   │   ├── queue.py          # Queue management
+│   │   └── ...
+│   ├── collectors/           # External source collectors
+│   │   ├── github.py
+│   │   ├── rss.py
+│   │   ├── arxiv.py
+│   │   └── reddit.py
+│   └── services/             # Background services
+│       ├── ingestion_queue.py
+│       ├── refinement.py
+│       ├── scheduler.py
+│       └── secret_scanner.py
+│
+├── scripts/                   # Utility scripts
+│   ├── obsidian_rag_ingester.py    # Obsidian watch-folder pipeline
+│   ├── obsidian_metadata.py        # YAML extraction
+│   ├── obsidian_chunker.py         # Heading-based chunking
+│   ├── obsidian_ledger.py          # SQLite deduplication
+│   ├── obsidian_api.py              # FastAPI reindex endpoint
+│   ├── prompt_ingester.py           # Prompt ingestion
+│   ├── seed_prompt_corpus.py        # Seed prompt corpus
+│   ├── intelligence_pipeline.py     # Intelligence OS pipeline
+│   ├── embed_worker.py              # Background embedding worker
+│   ├── ingest.py                    # Main ingestion script
+│   ├── watch_and_ingest.py          # Inbox watcher
+│   └── config.py                     # Configuration
+│
+├── src/                       # Client utilities
+│   ├── app/
+│   │   └── streamlit_app.py  # Streamlit GUI
+│   ├── prompt_rag.py         # Prompt RAG retrieval
+│   ├── api_client.py         # FastAPI client
+│   └── rag_utils.py          # RAG utilities
+│
+├── config/                    # Configuration files
+│   ├── obsidian-templates/   # Obsidian templates (version-controlled)
+│   └── quickadd-macros.json  # QuickAdd configuration
+│
+├── knowledge/                 # Knowledge base (gitignored)
+│   ├── inbox/                # Drop files here
+│   ├── notes/                # Obsidian vault (gitignored)
+│   │   ├── Manual/          # Manual notes
+│   │   ├── Auto/            # Auto-ingested notes
+│   │   └── _templates/      # Obsidian templates
+│   ├── processed/           # Processed files
+│   └── archived/            # Archived files
+│
+├── chroma/                    # ChromaDB data (gitignored)
+├── data/                      # Data directory (gitignored)
+│   ├── lancedb_obsidian/     # LanceDB Obsidian collection
+│   ├── tantivy_obsidian/     # Tantivy full-text index
+│   └── obsidian_ingestion_ledger.db  # SQLite ledger
+│
+├── prompts/                   # Prompt corpus (gitignored)
+│
+├── tests/                     # Test suite
+│   └── ...
+│
+├── docker/                    # Docker configurations
+│   └── intelligence-minimal.yml
+│
+├── Dockerfile                 # Docker configuration
+├── docker-compose.yml         # Docker Compose config
+├── requirements.txt           # Python dependencies
+├── requirements-obsidian.txt # Obsidian RAG dependencies
+├── README.md                  # This file
+├── OBSIDIAN_RAG_IMPLEMENTATION_SUMMARY.md
+├── PROMPT_RAG_README.md
+├── INTELLIGENCE_OS_README.md
+└── .gitignore                 # Git ignore rules
+```
+
+---
+
+## Using the RAG System
+
+### Adding Documents
+
+**Option 1: Drop files in inbox**
+```bash
+# Place PDFs/Markdown in:
+./knowledge/inbox/
+```
+
+**Option 2: Point ingestion pipeline to a folder**
+```bash
+python scripts/ingest.py --src ./data --no-reset
+```
+
+**Option 3: Use Streamlit UI**
+- Open Streamlit → Ingest tab
+- Click "Embed Now (Load → Embed → Unload)"
+
+### Running a User Query
+
+**Through Streamlit UI:**
+- Navigate to "Ask a Question" tab
+- Enter your query
+- View results with source citations
+
+**Via API:**
+```bash
+curl -X POST http://localhost:8000/query \
+     -H "Content-Type: application/json" \
+     -d '{"query": "How does my pipeline handle Obsidian?"}'
+```
+
+**Via Python:**
+```python
+import requests
+
+response = requests.post(
+    "http://localhost:8000/query",
+    json={"query": "Explain the Obsidian integration"}
+)
+print(response.json())
+```
+
+---
+
+## Ingestion Pipelines
+
+### Automatic Ingestion
+
+The ingestion pipeline includes:
+
+1. **Deduplication** (SQLite ledger)
+2. **Preprocessing** (markdown, text extraction)
+3. **Chunking** (semantic heading-based)
+4. **Embedding** (Ollama or fastembed)
+5. **Storing** in ChromaDB
+
+### Run Ingestion
+
+```bash
+# Single file
+python scripts/ingest.py --src knowledge/inbox/file.md
+
+# Batch ingestion
+python scripts/ingest.py --src knowledge/inbox --parallel
+
+# Watch mode (continuous)
+python scripts/watch_and_ingest.py
+```
+
+### API Endpoints
+
+```bash
+# Ingest single file
+curl -X POST "http://localhost:8000/ingest/file" \
+     -H "Content-Type: application/json" \
+     -d '{"path": "knowledge/inbox/myfile.md"}'
+
+# Run batch ingestion
+curl -X POST "http://localhost:8000/ingest/run?path=knowledge/inbox&fast=true&parallel=true"
+```
+
+---
+
+## Obsidian Integration
+
+### Setup
+
+1. **Configure `.env`:**
+```bash
+OBSIDIAN_VAULT_PATH=/path/to/your/vault
+```
+
+2. **Start the watcher:**
+```bash
+python scripts/obsidian_rag_ingester.py
+```
+
+### Features
+
+The Obsidian watcher automatically:
+- Detects file changes in `knowledge/notes/Manual/` and `knowledge/notes/Auto/`
+- Extracts YAML frontmatter (with graceful fallback)
+- Chunks content by headings (H1-H6) with 150-char overlap
+- Checks SQLite ledger for deduplication
+- Pre-computes chunk summaries via Ollama (optional)
+- Embeds with fastembed (3-6x faster)
+- Stores in LanceDB with obsidian:// deep links
+- Separates curated vs raw collections
+
+### Force Reindex
+
+```bash
+# Via FastAPI endpoint
+curl -X POST "http://localhost:8001/reindex?file=Manual/MyNote.md"
+
+# Or start the API server
+python scripts/obsidian_api.py
+```
+
+### Documentation
+
+See `scripts/OBSIDIAN_RAG_README.md` for detailed documentation.
+
+---
+
+## Prompt RAG (Prompt Intelligence Layer)
+
+### Overview
+
+The Prompt RAG Layer provides an elite prompt repository with:
+- Prompt ingestion from GitHub/HF repos
+- Extraction + scoring
+- Embedding / indexing in LanceDB
+- Hybrid retrieval on every query
+- System-prompt augmentation
+
+### Run Prompt Ingestion
+
+```bash
+# Ingest prompts from a repository
+python scripts/prompt_ingester.py --source github --repo microsoft/guidance
+
+# Seed initial corpus
+python scripts/seed_prompt_corpus.py
+```
+
+### Use Prompt RAG
+
+```python
+from src.prompt_rag import retrieve_prompts
+
+# Retrieve relevant prompts for a query
+prompts = retrieve_prompts("improve logging", top_k=3)
+for prompt in prompts:
+    print(f"Score: {prompt['score']}")
+    print(f"Content: {prompt['content'][:200]}...")
+```
+
+### API Endpoints
+
+```bash
+# Retrieve prompts
+curl -X GET "http://localhost:8000/prompts/retrieve?query=improve+logging&top_k=3"
+```
+
+### Documentation
+
+See `PROMPT_RAG_README.md` for detailed documentation.
+
+---
+
+## Intelligence OS Components
+
+### Collectors
+
+Fetch external knowledge using scheduled or on-demand collectors:
+
+```bash
+# GitHub collector
+python backend/collectors/github.py --repo microsoft/guidance --limit 10
+
+# RSS collector
+python backend/collectors/rss.py --feed https://example.com/feed.xml
+
+# Reddit collector
+python backend/collectors/reddit.py --subreddit machinelearning --limit 20
+
+# arXiv collector
+python backend/collectors/arxiv.py --query "large language models" --max_results 10
+```
+
+### Secret Scanning
+
+Runs TruffleHog against incoming content:
+
+```bash
+python backend/services/secret_scanner.py --path knowledge/inbox
+```
+
+### Refinement Service
+
+Uses LLM to clean, summarize, and normalize content:
+
+```bash
+python backend/services/refinement.py --file knowledge/inbox/file.md
+```
+
+### Queue Management
+
+```bash
+# View queue status
+curl http://localhost:8000/queue/status
+
+# Add to queue
+curl -X POST "http://localhost:8000/queue/add" \
+     -H "Content-Type: application/json" \
+     -d '{"source": "github", "params": {"repo": "microsoft/guidance"}}'
+```
+
+### Documentation
+
+See `INTELLIGENCE_OS_README.md` for detailed documentation.
+
+---
+
+## Troubleshooting
+
+### Ollama Model Not Found
+
+```bash
+# Pull required models
+ollama pull mistral
+ollama pull nomic-embed-text
+```
+
+### Ollama Not Responding
+
+```bash
+# Check if Ollama is running
+curl http://localhost:11434/api/tags
+
+# Restart Ollama
+ollama serve
+```
+
+### ChromaDB "Cannot Write File"
+
+```bash
+# Delete lockfiles
+rm -rf chroma/*.lock
+
+# Or on Windows
+Remove-Item chroma\*.lock -Force
+```
+
+### LanceDB Permission Error
+
+```bash
+# Ensure directory is writable
+chmod -R 755 data/lancedb_obsidian
+
+# Or on Windows, check folder permissions
+```
+
+### Obsidian Not Ingesting
+
+1. Check `.env` has `OBSIDIAN_VAULT_PATH` set correctly
+2. Verify watcher is running: `python scripts/obsidian_rag_ingester.py`
+3. Check logs for errors
+4. Verify files are in `knowledge/notes/Manual/` or `knowledge/notes/Auto/`
+
+### Port Already in Use
+
+Change ports in:
+- `scripts/run_backend.bat` / `scripts/run_backend.sh` (FastAPI)
+- `src/app/streamlit_app.py` (Streamlit)
+- `scripts/obsidian_api.py` (Obsidian reindex API, default: 8001)
+
+### Import Errors
+
+```bash
+# Ensure all dependencies are installed
+pip install -r requirements.txt
+pip install -r requirements-obsidian.txt
+
+# Verify Python version
+python --version  # Should be 3.10+
+```
+
+---
+
+## API Documentation
+
+Once the backend is running, visit:
+- **Swagger UI**: http://localhost:8000/docs
+- **ReDoc**: http://localhost:8000/redoc
+
+### Key Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/ollama/status` | GET | Ollama service status |
+| `/ollama/embed` | POST | Embed texts |
+| `/ingest/file` | POST | Ingest single file |
+| `/ingest/run` | POST | Run batch ingestion |
+| `/library/list` | GET | List documents |
+| `/query` | POST | Query RAG system |
+| `/prompts/retrieve` | GET | Retrieve prompts (Prompt RAG) |
+| `/queue/status` | GET | Queue status |
+| `/reindex` | POST | Force reindex Obsidian note |
+
+---
 
 ## Development
 
 ### Running Tests
 
 ```bash
+# Run Obsidian integration tests
+python scripts/test_obsidian_integration.py
+
 # Run smoke tests
 python tests/smoke_test.py
 
@@ -205,50 +701,11 @@ pytest tests/
 GitHub Actions automatically runs smoke tests on version tags:
 
 ```bash
-git tag -a v0.1 -m "First release"
-git push origin v0.1
+git tag -a v0.2 -m "Release with Obsidian RAG"
+git push origin v0.2
 ```
 
-## API Documentation
-
-Once the backend is running, visit:
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-
-## Key Endpoints
-
-- `GET /health` - Health check
-- `GET /ollama/status` - Ollama service status
-- `POST /ollama/embed` - Embed texts
-- `POST /ingest/file` - Ingest single file
-- `POST /ingest/run` - Run batch ingestion
-- `GET /library/list` - List documents
-- `GET /visualize/umap` - Get UMAP coordinates
-
-## Troubleshooting
-
-### Ollama not responding
-
-```bash
-# Check if Ollama is running
-curl http://localhost:11434/api/tags
-
-# Restart Ollama
-ollama serve
-```
-
-### Model not found
-
-```bash
-# Pull the required model
-ollama pull nomic-embed-text
-```
-
-### Port already in use
-
-Change ports in:
-- `scripts/run_backend.bat` / `scripts/run_backend.sh` (FastAPI)
-- `src/app/streamlit_app.py` (Streamlit)
+---
 
 ## Roadmap
 
@@ -256,36 +713,52 @@ Change ports in:
 - [x] Single-file ingestion
 - [x] Docker support
 - [x] CI/CD pipeline
+- [x] Obsidian integration (Reference-class)
+- [x] Prompt RAG Layer
+- [x] Intelligence OS (collectors, refinement, scanning)
 - [ ] Graph visualization (Obsidian-style)
 - [ ] Plugin system
-- [ ] Refine loop with versioning
-- [ ] Obsidian sync
+- [ ] Hybrid BM25+vector search integration (tantivy)
+- [ ] Two-way Obsidian sync (Local REST API)
+
+---
 
 ## Contributing
 
 Contributions welcome! Please:
+
 1. Fork the repository
-2. Create a feature branch
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
 4. Add tests
-5. Submit a pull request
+5. Commit your changes (`git commit -m 'Add amazing feature'`)
+6. Push to the branch (`git push origin feature/amazing-feature`)
+7. Open a Pull Request
+
+---
 
 ## License
 
 MIT License - see LICENSE file for details
 
+---
+
 ## Acknowledgments
 
 - [Ollama](https://ollama.com) for local LLM inference
 - [ChromaDB](https://www.trychroma.com/) for vector storage
+- [LanceDB](https://lancedb.github.io/lancedb/) for prompt + Obsidian storage
+- [fastembed](https://github.com/qdrant/fastembed) for fast embeddings
 - [FastAPI](https://fastapi.tiangolo.com/) for the API framework
 - [Streamlit](https://streamlit.io/) for the GUI
+- [TruffleHog](https://github.com/trufflesecurity/trufflehog) for secret scanning
+
+---
 
 ## Version
 
-**v0.1** - Initial release with Ollama integration
+**v0.2** - Release with Obsidian RAG Pipeline, Prompt RAG Layer, and Intelligence OS
 
 ---
 
 **Built with ❤️ for local, private AI**
-
