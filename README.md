@@ -114,10 +114,10 @@ graph LR
     end
     B --> C[Ingestion Queue]
     C --> D[Refinement LLM]
-    D --> E[Vector Stores<br/>ChromaDB + LanceDB]
-    E --> F[SQLite Ledger<br/>(Deduplication)]
-    F --> G[Query Pipeline<br/>(Hybrid Search)]
-    G --> H[Ollama Uncensored<br/>(dolphin/mistral)]
+    D --> E["Vector Stores: ChromaDB + LanceDB"]
+    E --> F["SQLite Ledger: Deduplication"]
+    F --> G["Query Pipeline: Hybrid Search"]
+    G --> H["Ollama: dolphin/mistral"]
     H --> I[Streamlit UI / API Response]
     J[Obsidian Vault] -.->|Watcher| E
     K[Prompts Curated] -.->|RAG Layer| G
