@@ -47,6 +47,21 @@ def get_ollama_status() -> Dict:
         return {"available": False, "status": "not_ready", "error": str(e)}
 
 
+def get_ollama_models() -> List[str]:
+    """Get list of available Ollama models."""
+    try:
+        response = requests.get("http://localhost:11434/api/tags", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            models = [model["name"] for model in data.get("models", [])]
+            return models if models else ["mistral:7b-instruct-q5_K_M"]  # Fallback to default
+        else:
+            return ["mistral:7b-instruct-q5_K_M"]  # Fallback on error
+    except Exception:
+        # Fallback to default model on any error
+        return ["mistral:7b-instruct-q5_K_M"]
+
+
 def start_lm_studio(server_mode: bool = False, model: Optional[str] = None) -> Dict:
     """Start LM Studio."""
     try:

@@ -14,7 +14,10 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         sys.exit(0)
 
-    answer, metas, _ = rag_utils.answer_question(question)
+    # Use new answer_question API (returns dict)
+    result = rag_utils.answer_question(question)
+    answer = result["response"]
+    metas = result.get("sources", [])
     sources = rag_utils.format_sources(metas)
     if sources:
         answer += "\n\nSources:\n" + "\n".join(f"- {line}" for line in sources)

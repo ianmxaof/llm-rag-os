@@ -16,10 +16,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src import rag_utils
 from src.api_client import (
     check_backend_available, get_llm_status, start_lm_studio, stop_lm_studio,
-    get_ollama_status, list_documents, get_chunks, get_document, update_document_metadata, 
+    get_ollama_status, get_ollama_models, list_documents, get_chunks, get_document, update_document_metadata, 
     run_ingestion, ingest_file, get_umap_coords, get_corpus_stats,
     get_graph_nodes, get_graph_edges, get_archived_documents, get_tags, get_files_by_tag
 )
+from src.crystallize import crystallize_turn, crystallize_conversation
 from scripts.config import config
 import psutil
 
@@ -88,30 +89,103 @@ with tabs[1]:
     st.header("Chat")
     st.caption("Query your local knowledge base. Make sure Ollama is running: `ollama serve`")
     
+    # Initialize chat history
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    
+    # Crystallize entire conversation button
+    if st.session_state.chat_history:
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("💎 Crystallize Entire Conversation", type="primary", use_container_width=True):
+                try:
+                    filepath = crystallize_conversation(st.session_state.chat_history)
+                    st.success(f"✅ Conversation crystallized → `{filepath}`\n\nReady for Obsidian ingestion!")
+                except Exception as e:
+                    st.error(f"Failed to crystallize conversation: {e}")
+        st.markdown("---")
+    
+    # Mode selector and controls
+    col1, col2, col3 = st.columns([1, 3, 2])
+    with col1:
+        raw_mode = st.checkbox("☠️ Uncensored Raw Mode", value=False, 
+                              help="Bypass RAG entirely — pure uncensored model chat (like LM Studio)")
+    with col2:
+        if not raw_mode:
+            rag_threshold = st.slider("RAG relevance threshold", 0.0, 1.0, 0.25, 0.05,
+                                     help="Lower = more aggressive RAG, 0.0 = always use RAG")
+        else:
+            rag_threshold = 0.0  # Ignored in raw mode
+            st.caption("Raw mode: RAG threshold disabled")
+    with col3:
+        try:
+            available_models = get_ollama_models()
+            # Find current model index or default to 0
+            current_model = config.OLLAMA_CHAT_MODEL
+            model_index = 0
+            if current_model in available_models:
+                model_index = available_models.index(current_model)
+            selected_model = st.selectbox("Model", available_models, index=model_index,
+                                         help="Select Ollama model for chat")
+        except Exception as e:
+            selected_model = config.OLLAMA_CHAT_MODEL
+            st.caption(f"Using default: {selected_model}")
+    
     with st.sidebar:
         st.header("Settings")
         top_k = st.slider("Top-K context chunks", min_value=1, max_value=10, value=rag_utils.DEFAULT_K)
         show_context = st.checkbox("Show retrieved context", value=False)
         st.markdown("**Chat model:**")
-        st.code(config.OLLAMA_CHAT_MODEL, language="bash")
+        st.code(selected_model, language="bash")
         st.markdown("**Embedding model:**")
         st.code(config.OLLAMA_EMBED_MODEL, language="bash")
         st.markdown("**Ollama API:**")
         st.code(config.OLLAMA_API_BASE, language="bash")
-    
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
     
     question = st.chat_input("Ask a question about your documents...")
     
     if question:
         with st.spinner("Thinking..."):
             try:
-                answer, metas, context = rag_utils.answer_question(question, k=top_k)
-                sources = rag_utils.format_sources(metas)
-                st.session_state.chat_history.append(
-                    {"question": question, "answer": answer, "sources": sources, "context": context}
+                # Call updated answer_question with new parameters
+                result = rag_utils.answer_question(
+                    question, 
+                    k=top_k,
+                    raw_mode=raw_mode,
+                    rag_threshold=rag_threshold,
+                    model=selected_model
                 )
+                
+                # Extract response components
+                answer = result["response"]
+                mode = result["mode"]
+                max_relevance = result["max_relevance"]
+                model_used = result["model"]
+                sources_list = result.get("sources", [])
+                context = result.get("context", "")
+                
+                # Format sources
+                if sources_list:
+                    sources = rag_utils.format_sources(sources_list)
+                else:
+                    sources = []
+                
+                # Store in chat history with metadata
+                st.session_state.chat_history.append({
+                    "question": question,
+                    "answer": answer,
+                    "sources": sources,
+                    "context": context,
+                    "mode": mode,
+                    "max_relevance": max_relevance,
+                    "model": model_used,
+                    "rag_threshold": rag_threshold
+                })
+                
+                # Show warning if RAG was skipped
+                if mode == "⚡ Auto-Fallback":
+                    st.warning(f"⚠️ No relevant docs (max relevance {max_relevance:.3f} < threshold {rag_threshold:.2f}) → pure model mode")
+                
             except Exception as e:
                 error_msg = str(e)
                 if "dimension" in error_msg.lower():
@@ -120,16 +194,66 @@ with tabs[1]:
                     st.error(f"Error answering question: {error_msg}")
                 logger.error(f"Error in answer_question: {e}", exc_info=True)
     
-    for entry in reversed(st.session_state.chat_history):
-        st.markdown(f"**You:** {entry['question']}")
-        st.markdown(f"**Assistant:** {entry['answer']}")
-        if entry["sources"]:
-            st.markdown("**Sources:**")
-            for src in entry["sources"]:
-                st.markdown(f"- {src}")
-        if show_context:
-            with st.expander("Retrieved context"):
-                st.text(entry["context"])
+    # Display chat history with badges and crystallize buttons
+    for idx, entry in enumerate(reversed(st.session_state.chat_history)):
+        # User message
+        with st.chat_message("user"):
+            st.markdown(entry['question'])
+        
+        # Assistant message
+        with st.chat_message("assistant"):
+            st.markdown(entry['answer'])
+            
+            # Mode badge and metadata
+            mode = entry.get("mode", "🔍 RAG Mode")
+            max_relevance = entry.get("max_relevance", 0.0)
+            model_used = entry.get("model", "unknown")
+            
+            # Relevance emoji
+            if max_relevance >= 0.7:
+                rel_emoji = "🟢"
+            elif max_relevance >= 0.4:
+                rel_emoji = "🟡"
+            else:
+                rel_emoji = "🔴"
+            
+            st.caption(f"**{mode}** | Relevance: {max_relevance:.3f} {rel_emoji} | Model: `{model_used}`")
+            
+            # Show warning for auto-fallback
+            if mode == "⚡ Auto-Fallback":
+                threshold = entry.get("rag_threshold", 0.25)
+                st.info(f"⚠️ RAG skipped (relevance {max_relevance:.3f} < threshold {threshold:.2f})")
+            
+            # Sources
+            if entry.get("sources"):
+                with st.expander("Sources"):
+                    for src in entry["sources"]:
+                        st.markdown(f"- {src}")
+            
+            # Context (if enabled)
+            if show_context and entry.get("context"):
+                with st.expander("Retrieved context"):
+                    st.text(entry["context"])
+            
+            # Crystallize button for this turn
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                if st.button("💎 Crystallize", key=f"cryst_{len(st.session_state.chat_history) - idx - 1}", 
+                            help="Export this turn as Markdown to Obsidian inbox"):
+                    try:
+                        metadata = {
+                            "mode": mode,
+                            "model": model_used,
+                            "max_relevance": max_relevance,
+                            "sources": entry.get("sources", []),
+                            "context": entry.get("context", ""),
+                            "rag_threshold": entry.get("rag_threshold", 0.25)
+                        }
+                        filepath = crystallize_turn(entry['question'], entry['answer'], metadata)
+                        st.success(f"✅ Crystallized → `{filepath.split('/')[-1]}`\n\nReady for Obsidian ingestion!")
+                    except Exception as e:
+                        st.error(f"Failed to crystallize: {e}")
+        
         st.markdown("---")
 
 # Library Tab

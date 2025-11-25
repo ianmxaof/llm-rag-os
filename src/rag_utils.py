@@ -1,10 +1,13 @@
 import os
 import sys
+import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import chromadb
 import requests
+
+logger = logging.getLogger(__name__)
 
 # Add parent directory to path for imports
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -62,7 +65,14 @@ def _get_collection():
 
 def retrieve_context(
     question: str, k: int = DEFAULT_K
-) -> Tuple[str, List[Dict], List[str]]:
+) -> Tuple[str, List[Dict], List[str], List[float]]:
+    """
+    Retrieve context from ChromaDB with similarity scores.
+    
+    Returns:
+        Tuple of (formatted_context, metadatas, documents, distances)
+        distances can be converted to similarities: similarity = 1 - distance
+    """
     collection = _get_collection()
     query_embedding = embed_texts([question])
     
@@ -95,8 +105,9 @@ def retrieve_context(
     
     documents = results.get("documents", [[]])[0]
     metadatas = results.get("metadatas", [[]])[0]
+    distances = results.get("distances", [[]])[0] if results.get("distances") else [1.0] * len(documents)
     formatted = format_context(documents, metadatas)
-    return formatted, metadatas, documents
+    return formatted, metadatas, documents, distances
 
 
 def format_context(docs: List[str], metas: List[Dict]) -> str:
@@ -247,13 +258,93 @@ def call_local_model(messages: List[Dict]) -> str:
     return ollama_chat(prompt, model=config.OLLAMA_CHAT_MODEL, stream=False)
 
 
-def answer_question(question: str, k: int = DEFAULT_K) -> Tuple[str, List[Dict], str]:
-    context, metas, _ = retrieve_context(question, k=k)
-    prompt = build_prompt(question, context)
-    # For compatibility, wrap in messages format, but call_local_model will extract it
-    messages = [{"role": "user", "content": prompt}]
-    answer = call_local_model(messages)
-    return answer, metas, context
+def answer_question(
+    question: str, 
+    k: int = DEFAULT_K,
+    raw_mode: bool = False,
+    rag_threshold: float = 0.25,
+    model: Optional[str] = None
+) -> Dict:
+    """
+    Answer a question with optional raw mode and RAG threshold fallback.
+    
+    Args:
+        question: User query
+        k: Number of context chunks to retrieve
+        raw_mode: If True, bypass RAG entirely for pure uncensored chat
+        rag_threshold: Minimum relevance score to use RAG (0.0-1.0)
+        model: Optional model override (defaults to config.OLLAMA_CHAT_MODEL)
+    
+    Returns:
+        Dict with keys: response, sources, mode, max_relevance, model, context
+    """
+    model = model or config.OLLAMA_CHAT_MODEL
+    
+    # Pure uncensored mode: Skip RAG entirely
+    if raw_mode:
+        # Direct Ollama call with no context, no Prompt RAG
+        answer = ollama_chat(question, model=model, stream=False)
+        return {
+            "response": answer,
+            "sources": [],
+            "mode": "☠️ Raw Mode",
+            "max_relevance": 1.0,  # N/A for raw mode
+            "model": model,
+            "context": ""
+        }
+    
+    # Normal RAG mode: Retrieve context and check relevance
+    try:
+        context, metas, documents, distances = retrieve_context(question, k=k)
+        
+        # Convert distances to similarities (lower distance = higher similarity)
+        # ChromaDB uses cosine distance, normalize to 0-1 range
+        similarities = [max(0.0, 1.0 - dist) for dist in distances] if distances else [0.0]
+        max_similarity = max(similarities) if similarities else 0.0
+        
+        # Auto-fallback: Skip RAG if relevance is too low
+        if max_similarity < rag_threshold:
+            # Use pure model with a note about skipping RAG
+            answer = ollama_chat(
+                f"{question}\n\n(Note: Low relevance docs skipped for clarity.)",
+                model=model,
+                stream=False
+            )
+            return {
+                "response": answer,
+                "sources": [],
+                "mode": "⚡ Auto-Fallback",
+                "max_relevance": max_similarity,
+                "model": model,
+                "context": ""
+            }
+        
+        # Full RAG mode: Use context with Prompt RAG augmentation
+        prompt = build_prompt(question, context)
+        # Call Ollama directly with model parameter
+        answer = ollama_chat(prompt, model=model, stream=False)
+        
+        return {
+            "response": answer,
+            "sources": metas,
+            "mode": "🔍 RAG Mode",
+            "max_relevance": max_similarity,
+            "model": model,
+            "context": context
+        }
+    
+    except Exception as e:
+        # Fallback to raw mode on error
+        logger.error(f"RAG retrieval failed, falling back to raw mode: {e}")
+        answer = ollama_chat(question, model=model, stream=False)
+        return {
+            "response": answer,
+            "sources": [],
+            "mode": "☠️ Raw Mode (Error Fallback)",
+            "max_relevance": 0.0,
+            "model": model,
+            "context": ""
+        }
 
 
 def format_sources(metas: List[Dict]) -> List[str]:
