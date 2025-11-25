@@ -20,6 +20,7 @@ import hashlib
 import logging
 import os
 import sys
+import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -219,10 +220,233 @@ class ObsidianIngester:
         
         return None
     
+    def _is_crystallized_file(self, file_path: Path) -> bool:
+        """
+        Check if a file is a crystallized note (from Crystallize feature).
+        
+        Args:
+            file_path: Path to markdown file
+        
+        Returns:
+            True if file appears to be crystallized
+        """
+        try:
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            # Check for crystallized indicators in frontmatter or filename
+            if "crystallized" in content.lower()[:2000]:  # Check first 2KB for frontmatter
+                # Check for crystallized tag or mode in frontmatter
+                if "tags:" in content and "crystallized" in content:
+                    return True
+                if "mode:" in content and ("Raw Mode" in content or "RAG Mode" in content or "Auto-Fallback" in content):
+                    return True
+            # Check filename pattern
+            if "_crystallized" in file_path.stem or "crystallized" in file_path.stem.lower():
+                return True
+        except Exception as e:
+            logger.warning(f"Error checking if file is crystallized: {e}")
+        
+        return False
+    
+    def _delete_chunks_for_file(self, file_path: Path) -> int:
+        """
+        Soft-delete all chunks for a specific file from LanceDB collections.
+        Uses metadata flag pattern (production standard for LanceDB).
+        
+        Since LanceDB doesn't support UPDATE operations, we re-insert chunks
+        with deleted: true metadata and filter queries to exclude them.
+        
+        Args:
+            file_path: Path to file whose chunks should be deleted
+        
+        Returns:
+            Number of chunks soft-deleted
+        """
+        deleted_count = 0
+        
+        try:
+            # Normalize file path for comparison (try both absolute and relative)
+            file_path_abs = str(file_path.resolve())
+            file_path_rel = str(file_path)
+            
+            # Soft-delete from curated collection
+            if self.curated_table is not None:
+                try:
+                    # Query chunks matching this file (excluding already deleted ones)
+                    # Note: We need to get the actual data to re-insert with deleted flag
+                    all_data = self.curated_table.to_pandas()
+                    
+                    if not all_data.empty and 'source' in all_data.columns:
+                        # Find chunks matching deleted file (that aren't already deleted)
+                        mask = (
+                            (all_data['source'].astype(str).str.contains(file_path_abs, na=False) |
+                             all_data['source'].astype(str).str.contains(file_path_rel, na=False) |
+                             all_data['source'].astype(str).str.contains(file_path.name, na=False)) &
+                            (all_data.get('deleted', pd.Series(['false'] * len(all_data))).astype(str) != 'true')
+                        )
+                        
+                        rows_to_delete = all_data[mask]
+                        deleted_count += len(rows_to_delete)
+                        
+                        if len(rows_to_delete) > 0:
+                            logger.info(f"Soft-deleting {len(rows_to_delete)} chunks from curated collection for {file_path.name}")
+                            
+                            # Re-insert with deleted: true flag
+                            # Extract vectors, texts, and metadata
+                            import pyarrow as pa
+                            
+                            # Get vector column (assuming it's named 'vector')
+                            vectors = rows_to_delete['vector'].tolist() if 'vector' in rows_to_delete.columns else []
+                            texts = rows_to_delete['text'].tolist() if 'text' in rows_to_delete.columns else []
+                            
+                            # Update metadata to mark as deleted
+                            metadata_dict = {}
+                            for col in rows_to_delete.columns:
+                                if col not in ['vector', 'text']:
+                                    if col == 'deleted':
+                                        metadata_dict[col] = ['true'] * len(rows_to_delete)
+                                    else:
+                                        metadata_dict[col] = rows_to_delete[col].astype(str).tolist()
+                            
+                            # Add deleted flag if not present
+                            if 'deleted' not in metadata_dict:
+                                metadata_dict['deleted'] = ['true'] * len(rows_to_delete)
+                            
+                            # Reconstruct schema and insert
+                            schema_fields = [pa.field('vector', pa.list_(pa.float32())), pa.field('text', pa.string())]
+                            for key in sorted(metadata_dict.keys()):
+                                schema_fields.append(pa.field(key, pa.string()))
+                            
+                            schema = pa.schema(schema_fields)
+                            arrays = [
+                                pa.array(vectors, type=pa.list_(pa.float32())),
+                                pa.array(texts, type=pa.string())
+                            ]
+                            for key in sorted(metadata_dict.keys()):
+                                arrays.append(pa.array(metadata_dict[key], type=pa.string()))
+                            
+                            table_data = pa.Table.from_arrays(arrays, schema=schema)
+                            self.curated_table.add(table_data)
+                            
+                            logger.info(f"Marked {len(rows_to_delete)} chunks as deleted in curated collection")
+                except Exception as e:
+                    logger.warning(f"Error soft-deleting from curated collection: {e}")
+            
+            # Soft-delete from raw collection
+            if self.raw_table is not None:
+                try:
+                    all_data = self.raw_table.to_pandas()
+                    
+                    if not all_data.empty and 'source' in all_data.columns:
+                        mask = (
+                            (all_data['source'].astype(str).str.contains(file_path_abs, na=False) |
+                             all_data['source'].astype(str).str.contains(file_path_rel, na=False) |
+                             all_data['source'].astype(str).str.contains(file_path.name, na=False)) &
+                            (all_data.get('deleted', pd.Series(['false'] * len(all_data))).astype(str) != 'true')
+                        )
+                        
+                        rows_to_delete = all_data[mask]
+                        deleted_count += len(rows_to_delete)
+                        
+                        if len(rows_to_delete) > 0:
+                            logger.info(f"Soft-deleting {len(rows_to_delete)} chunks from raw collection for {file_path.name}")
+                            
+                            # Re-insert with deleted: true (same process as curated)
+                            import pyarrow as pa
+                            
+                            vectors = rows_to_delete['vector'].tolist() if 'vector' in rows_to_delete.columns else []
+                            texts = rows_to_delete['text'].tolist() if 'text' in rows_to_delete.columns else []
+                            
+                            metadata_dict = {}
+                            for col in rows_to_delete.columns:
+                                if col not in ['vector', 'text']:
+                                    if col == 'deleted':
+                                        metadata_dict[col] = ['true'] * len(rows_to_delete)
+                                    else:
+                                        metadata_dict[col] = rows_to_delete[col].astype(str).tolist()
+                            
+                            if 'deleted' not in metadata_dict:
+                                metadata_dict['deleted'] = ['true'] * len(rows_to_delete)
+                            
+                            schema_fields = [pa.field('vector', pa.list_(pa.float32())), pa.field('text', pa.string())]
+                            for key in sorted(metadata_dict.keys()):
+                                schema_fields.append(pa.field(key, pa.string()))
+                            
+                            schema = pa.schema(schema_fields)
+                            arrays = [
+                                pa.array(vectors, type=pa.list_(pa.float32())),
+                                pa.array(texts, type=pa.string())
+                            ]
+                            for key in sorted(metadata_dict.keys()):
+                                arrays.append(pa.array(metadata_dict[key], type=pa.string()))
+                            
+                            table_data = pa.Table.from_arrays(arrays, schema=schema)
+                            self.raw_table.add(table_data)
+                            
+                            logger.info(f"Marked {len(rows_to_delete)} chunks as deleted in raw collection")
+                except Exception as e:
+                    logger.warning(f"Error soft-deleting from raw collection: {e}")
+            
+        except Exception as e:
+            logger.error(f"Error soft-deleting chunks for {file_path}: {e}", exc_info=True)
+        
+        return deleted_count
+    
+    @staticmethod
+    def filter_deleted_chunks(results: List[Dict]) -> List[Dict]:
+        """
+        Filter out soft-deleted chunks from query results.
+        
+        This helper method should be used when querying LanceDB Obsidian collections
+        to exclude chunks that have been soft-deleted.
+        
+        Args:
+            results: List of result dictionaries from LanceDB query
+        
+        Returns:
+            Filtered list excluding deleted chunks
+        """
+        return [r for r in results if r.get('deleted', 'false') != 'true']
+    
+    def reingest_single_file(self, file_path: Path, mark_as_curated: bool = False) -> Dict:
+        """
+        Re-ingest a single file, deleting old chunks first.
+        Used for Memory Editor feature when crystallized files are edited.
+        
+        Args:
+            file_path: Path to file to re-ingest
+            mark_as_curated: Force mark as curated (for edited crystallized files)
+        
+        Returns:
+            Dictionary with processing results
+        """
+        logger.info(f"🧠 Re-ingesting edited file: {file_path.name}")
+        
+        # Delete old chunks
+        deleted_count = self._delete_chunks_for_file(file_path)
+        if deleted_count > 0:
+            logger.info(f"Deleted {deleted_count} old chunks for {file_path.name}")
+        
+        # Clear from ledger to force re-ingestion
+        self.ledger.clear_file(file_path)
+        
+        # Process with force flag to ensure re-ingestion
+        result = self.process_note(file_path, force=True)
+        
+        # If mark_as_curated, ensure it goes to curated collection
+        if mark_as_curated and result.get("status") == "success":
+            result["trust_level"] = "curated"
+            logger.info(f"Marked {file_path.name} as curated after edit")
+        
+        return result
+    
     def _determine_trust_level(self, metadata: Dict, file_path: Path) -> str:
         """Determine trust level (curated vs raw) based on source and confidence."""
         # Manual folder = curated
         if "Manual" in str(file_path):
+            return "curated"
+        
+        # Crystallized files are always curated (high-value user-curated content)
+        if self._is_crystallized_file(file_path):
             return "curated"
         
         # Check confidence in metadata
@@ -294,6 +518,9 @@ class ObsidianIngester:
                 
                 # Add trust level
                 chunk_meta['trust_level'] = trust_level
+                
+                # Add soft-delete flag (default: false)
+                chunk_meta['deleted'] = 'false'
                 
                 # Pre-compute summary
                 if PRE_COMPUTE_CHUNK_SUMMARIES:
@@ -418,7 +645,58 @@ class NoteHandler(FileSystemEventHandler):
     def on_modified(self, event):
         """Handle file modification."""
         if not event.is_directory:
-            self._process_file(Path(event.src_path))
+            file_path = Path(event.src_path)
+            # Check if this is a crystallized file being edited
+            if self.ingester._is_crystallized_file(file_path):
+                logger.info(f"🧠 Detected edit to crystallized file: {file_path.name}")
+                # Re-ingest with curated status
+                result = self.ingester.reingest_single_file(file_path, mark_as_curated=True)
+                if result.get("status") == "success":
+                    logger.info(f"✅ Memory updated: {file_path.name} (your edit was learned)")
+                    # Could add notification here if Streamlit is running
+                    self._notify_memory_update(file_path)
+                else:
+                    logger.warning(f"Failed to update memory for {file_path.name}: {result.get('error', 'unknown')}")
+            else:
+                # Normal file modification
+                self._process_file(file_path)
+    
+    def on_deleted(self, event):
+        """Handle file deletion."""
+        if not event.is_directory:
+            file_path = Path(event.src_path)
+            if file_path.suffix == ".md":
+                self._handle_file_deleted(file_path)
+    
+    def _handle_file_deleted(self, file_path: Path):
+        """
+        Handle file deletion - remove chunks and ledger entry.
+        
+        Args:
+            file_path: Path to deleted file
+        """
+        # Check if file was previously ingested (query ledger)
+        stored_hash = self.ingester.ledger.get_file_hash(file_path)
+        if stored_hash is None:
+            logger.debug(f"File {file_path.name} was not in ledger, skipping deletion")
+            return
+        
+        logger.info(f"🗑️ Detected deletion of ingested file: {file_path.name}")
+        
+        # Delete chunks from vector store
+        deleted_count = self.ingester._delete_chunks_for_file(file_path)
+        if deleted_count > 0:
+            logger.info(f"Deleted {deleted_count} chunks for {file_path.name}")
+        
+        # Remove from ingestion ledger
+        self.ingester.ledger.clear_file(file_path)
+        logger.info(f"✅ Removed {file_path.name} from ledger (ghost memory deleted)")
+    
+    def _notify_memory_update(self, file_path: Path):
+        """Notify user that memory was updated (placeholder for future integration)."""
+        # This could integrate with Streamlit notifications or system notifications
+        # For now, just log it
+        logger.info(f"🧠 Memory updated notification: {file_path.name}")
     
     def _process_file(self, file_path: Path):
         """Process a file if it matches criteria."""

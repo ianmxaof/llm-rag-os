@@ -21,6 +21,8 @@ from src.api_client import (
     get_graph_nodes, get_graph_edges, get_archived_documents, get_tags, get_files_by_tag
 )
 from src.crystallize import crystallize_turn, crystallize_conversation
+from scripts.chat_logger import ChatLogger
+import uuid
 from scripts.config import config
 import psutil
 
@@ -89,9 +91,24 @@ with tabs[1]:
     st.header("Chat")
     st.caption("Query your local knowledge base. Make sure Ollama is running: `ollama serve`")
     
-    # Initialize chat history
+    # Initialize chat history and ChatLogger
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
+    
+    # Initialize session ID and conversation ID
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    
+    if "conversation_id" not in st.session_state:
+        st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    
+    # Initialize ChatLogger
+    if "chat_logger" not in st.session_state:
+        try:
+            st.session_state.chat_logger = ChatLogger()
+        except Exception as e:
+            logger.warning(f"Failed to initialize ChatLogger: {e}")
+            st.session_state.chat_logger = None
     
     # Crystallize entire conversation button
     if st.session_state.chat_history:
@@ -100,6 +117,19 @@ with tabs[1]:
             if st.button("💎 Crystallize Entire Conversation", type="primary", use_container_width=True):
                 try:
                     filepath = crystallize_conversation(st.session_state.chat_history)
+                    
+                    # Mark all messages in conversation as crystallized
+                    if st.session_state.chat_logger:
+                        for entry in st.session_state.chat_history:
+                            if entry.get("ai_log_id"):
+                                try:
+                                    st.session_state.chat_logger.mark_crystallized(
+                                        entry["ai_log_id"],
+                                        filepath
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"Failed to mark message as crystallized: {e}")
+                    
                     st.success(f"✅ Conversation crystallized → `{filepath}`\n\nReady for Obsidian ingestion!")
                 except Exception as e:
                     st.error(f"Failed to crystallize conversation: {e}")
@@ -132,6 +162,24 @@ with tabs[1]:
             st.caption(f"Using default: {selected_model}")
     
     with st.sidebar:
+        st.header("Session Context")
+        current_focus = st.selectbox(
+            "Current Focus",
+            ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"],
+            index=0,
+            help="What are you working on right now?"
+        )
+        project_tag = st.text_input(
+            "Project Tag",
+            value=st.session_state.get("project_tag", ""),
+            placeholder="e.g. metacog-v2, obsidian-integration",
+            help="Tag for this project/session"
+        )
+        # Store in session state
+        st.session_state.current_focus = current_focus
+        st.session_state.project_tag = project_tag
+        
+        st.markdown("---")
         st.header("Settings")
         top_k = st.slider("Top-K context chunks", min_value=1, max_value=10, value=rag_utils.DEFAULT_K)
         show_context = st.checkbox("Show retrieved context", value=False)
@@ -170,7 +218,41 @@ with tabs[1]:
                 else:
                     sources = []
                 
-                # Store in chat history with metadata
+                # Log user question to ChatLogger
+                if st.session_state.chat_logger:
+                    try:
+                        user_log_id = st.session_state.chat_logger.log_message(
+                            session_id=st.session_state.session_id,
+                            role="user",
+                            content=question,
+                            conversation_id=st.session_state.conversation_id
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to log user message: {e}")
+                        user_log_id = None
+                else:
+                    user_log_id = None
+                
+                # Log AI response to ChatLogger
+                if st.session_state.chat_logger:
+                    try:
+                        ai_log_id = st.session_state.chat_logger.log_message(
+                            session_id=st.session_state.session_id,
+                            role="assistant",
+                            content=answer,
+                            mode=mode,
+                            model=model_used,
+                            max_relevance=max_relevance,
+                            sources=sources_list,  # Store raw sources list
+                            conversation_id=st.session_state.conversation_id
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to log AI message: {e}")
+                        ai_log_id = None
+                else:
+                    ai_log_id = None
+                
+                # Store in chat history with metadata and log IDs
                 st.session_state.chat_history.append({
                     "question": question,
                     "answer": answer,
@@ -179,7 +261,10 @@ with tabs[1]:
                     "mode": mode,
                     "max_relevance": max_relevance,
                     "model": model_used,
-                    "rag_threshold": rag_threshold
+                    "rag_threshold": rag_threshold,
+                    "conversation_id": st.session_state.conversation_id,
+                    "user_log_id": user_log_id,
+                    "ai_log_id": ai_log_id
                 })
                 
                 # Show warning if RAG was skipped
@@ -247,9 +332,33 @@ with tabs[1]:
                             "max_relevance": max_relevance,
                             "sources": entry.get("sources", []),
                             "context": entry.get("context", ""),
-                            "rag_threshold": entry.get("rag_threshold", 0.25)
+                            "rag_threshold": entry.get("rag_threshold", 0.25),
+                            "conversation_id": entry.get("conversation_id", st.session_state.conversation_id)
                         }
-                        filepath = crystallize_turn(entry['question'], entry['answer'], metadata)
+                        
+                        # Get user context from session state
+                        user_focus = st.session_state.get("current_focus", "General")
+                        project_tag = st.session_state.get("project_tag", "")
+                        
+                        filepath = crystallize_turn(
+                            entry['question'], 
+                            entry['answer'], 
+                            metadata,
+                            conversation_history=st.session_state.chat_history,
+                            user_focus=user_focus,
+                            project_tag=project_tag
+                        )
+                        
+                        # Mark message as crystallized in ChatLogger
+                        if st.session_state.chat_logger and entry.get("ai_log_id"):
+                            try:
+                                st.session_state.chat_logger.mark_crystallized(
+                                    entry["ai_log_id"],
+                                    filepath
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to mark message as crystallized: {e}")
+                        
                         st.success(f"✅ Crystallized → `{filepath.split('/')[-1]}`\n\nReady for Obsidian ingestion!")
                     except Exception as e:
                         st.error(f"Failed to crystallize: {e}")
