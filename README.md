@@ -92,6 +92,16 @@ Pulls content from:
 - Pre-computed chunk summaries via Ollama
 - obsidian:// deep link generation
 - Separate curated/raw collections
+- **Soft-delete pattern** for ghost memory deletion (production-standard)
+- **Vector-driven auto-linking** via LanceDB similarity search
+
+### ✔ Metacognitive Features
+
+- **Persistent Chat Log Database** - SQLite-based chat history with `is_crystallized` flag
+- **Crystallize Functionality** - Export chat turns/conversations as Markdown to Obsidian inbox
+- **User-Driven Session Context** - Focus mode and project tags (ground-truth metadata)
+- **Metacognition Service** - Background service for proactive insight detection
+- **The Synthesizer** - MOC (Map of Content) generation foundation (Jan 2026)
 
 ---
 
@@ -590,7 +600,7 @@ llm-rag-os/
 │       └── secret_scanner.py
 │
 ├── scripts/                   # Utility scripts
-│   ├── obsidian_rag_ingester.py    # Obsidian watch-folder pipeline
+│   ├── obsidian_rag_ingester.py    # Obsidian watch-folder pipeline (with soft-delete)
 │   ├── obsidian_metadata.py        # YAML extraction
 │   ├── obsidian_chunker.py         # Heading-based chunking
 │   ├── obsidian_ledger.py          # SQLite deduplication
@@ -601,14 +611,18 @@ llm-rag-os/
 │   ├── embed_worker.py              # Background embedding worker
 │   ├── ingest.py                    # Main ingestion script
 │   ├── watch_and_ingest.py          # Inbox watcher
+│   ├── chat_logger.py               # Persistent chat log database
+│   ├── metacog_service.py           # Metacognition service
+│   ├── synthesizer.py               # MOC generation (foundation)
 │   └── config.py                     # Configuration
 │
 ├── src/                       # Client utilities
 │   ├── app/
-│   │   └── streamlit_app.py  # Streamlit GUI
+│   │   └── streamlit_app.py  # Streamlit GUI (with chat logging & session context)
 │   ├── prompt_rag.py         # Prompt RAG retrieval
 │   ├── api_client.py         # FastAPI client
-│   └── rag_utils.py          # RAG utilities
+│   ├── rag_utils.py          # RAG utilities
+│   └── crystallize.py        # Crystallize chat to Markdown
 │
 ├── config/                    # Configuration files
 │   ├── obsidian-templates/   # Obsidian templates (version-controlled)
@@ -627,7 +641,8 @@ llm-rag-os/
 ├── data/                      # Data directory (gitignored)
 │   ├── lancedb_obsidian/     # LanceDB Obsidian collection
 │   ├── tantivy_obsidian/     # Tantivy full-text index
-│   └── obsidian_ingestion_ledger.db  # SQLite ledger
+│   ├── obsidian_ingestion_ledger.db  # SQLite ledger
+│   └── chat_history.db       # Chat log database (metacognition)
 │
 ├── prompts/                   # Prompt corpus (gitignored)
 │
@@ -672,9 +687,38 @@ python scripts/ingest.py --src ./data --no-reset
 ### Running a User Query
 
 **Through Streamlit UI:**
-- Navigate to "Ask a Question" tab
+- Navigate to "Chat" tab
+- Select mode: **RAG Mode** (default), **Raw Mode** (uncensored), or **Auto-Fallback** (smart threshold)
+- Set RAG relevance threshold (0.0-1.0) - lower = more aggressive RAG
+- Select model from dropdown
 - Enter your query
-- View results with source citations
+- View results with source citations, mode badges, and relevance scores
+
+### Crystallize Feature
+
+Export chat conversations as Markdown files to Obsidian inbox:
+
+**Crystallize Single Turn:**
+- Click "💎 Crystallize" button below any AI response
+- File saved to `knowledge/inbox/` with rich metadata
+
+**Crystallize Entire Conversation:**
+- Click "💎 Crystallize Entire Conversation" button
+- All turns exported as single Markdown file
+
+**Features:**
+- Auto-generated wikilinks to semantically similar notes (vector-driven)
+- Rich YAML frontmatter (mode, model, relevance, conversation_id, user_mood, phase_of_life)
+- User-driven session context (focus mode, project tag from sidebar)
+- Ready for automatic Obsidian ingestion
+
+### Session Context
+
+Set your current focus and project tag in the Streamlit sidebar:
+- **Current Focus**: Researching, Building, Reflecting, Planning, Debugging, General
+- **Project Tag**: e.g., "metacog-v2", "obsidian-integration"
+
+These values are stamped directly into crystallized notes as ground-truth metadata (no LLM inference).
 
 **Via API:**
 ```bash
@@ -760,6 +804,19 @@ The Obsidian watcher automatically:
 - Embeds with fastembed (3-6x faster)
 - Stores in LanceDB with obsidian:// deep links
 - Separates curated vs raw collections
+- **Soft-delete pattern** - Deleted files are marked with `deleted: true` metadata (no ghost chunks)
+- **Two-way sync** - Edits to crystallized notes trigger automatic re-ingestion
+- **Vector-driven auto-linking** - Crystallized notes automatically link to semantically similar notes
+
+### Ghost Memory Deletion
+
+The system uses a **production-standard soft-delete pattern** for memory management:
+
+- When a file is deleted, chunks are marked with `deleted: true` metadata (not physically removed)
+- All queries automatically filter out deleted chunks
+- This ensures **ontological correctness** - what exists in Obsidian exists in AI memory, nothing more, nothing less
+- Performance: <100ms deletion (vs seconds for table recreation)
+- Allows recovery and audit trails
 
 ### Force Reindex
 
@@ -998,6 +1055,66 @@ git push origin v0.2
 
 ---
 
+## Metacognitive Features
+
+### Persistent Chat Log
+
+All chat messages are logged to SQLite database (`data/chat_history.db`):
+
+- **Perfect autobiographical recall** - AI remembers every word it ever spoke
+- **Crystallization tracking** - Messages marked as `is_crystallized` when exported
+- **Enables metacognition** - Background service can review uncrystallized chats
+
+**Access chat log:**
+```python
+from scripts.chat_logger import ChatLogger
+
+logger = ChatLogger()
+uncrystallized = logger.get_uncrystallized(hours=24)
+recent_chats = logger.get_recent_chats(hours=24)
+stats = logger.get_stats()
+```
+
+### Metacognition Service
+
+Background service that reviews recent chat logs and identifies high-value insights:
+
+```bash
+# Run once
+python scripts/metacog_service.py --once
+
+# Run continuously (every 4 hours)
+python scripts/metacog_service.py --interval 4
+```
+
+**Features:**
+- Scans uncrystallized chats from last 24 hours
+- Uses LLM to identify profound insights
+- Auto-crystallizes drafts to `knowledge/notes/Auto/_drafts/`
+- Notifies user of important findings
+
+### The Synthesizer (MOC Generation)
+
+Foundation for Map of Content (MOC) generation (full implementation: Jan 2026):
+
+```python
+from scripts.synthesizer import synthesize, save_as_moc
+
+# Generate MOC for a topic
+moc_content = synthesize("machine learning", top_k=50)
+if moc_content:
+    save_as_moc("Machine Learning", moc_content)
+```
+
+**Planned Features:**
+- Synthesizes 50+ related notes into structured overview
+- Organizes by themes/categories
+- Includes key insights and connections
+- Links to all source notes using wikilinks
+- Transforms AI from librarian to knowledge engineer
+
+---
+
 ## Roadmap
 
 - [x] Ollama integration with auto-unload
@@ -1007,10 +1124,16 @@ git push origin v0.2
 - [x] Obsidian integration (Reference-class)
 - [x] Prompt RAG Layer
 - [x] Intelligence OS (collectors, refinement, scanning)
+- [x] Ghost memory deletion (soft-delete pattern)
+- [x] Persistent chat log database
+- [x] Vector-driven auto-linking
+- [x] User-driven session context
+- [x] Metacognition service foundation
 - [ ] Graph visualization (Obsidian-style)
 - [ ] Plugin system
 - [ ] Hybrid BM25+vector search integration (tantivy)
 - [ ] Two-way Obsidian sync (Local REST API)
+- [ ] The Synthesizer (full MOC generation) - Jan 2026
 
 ---
 
@@ -1047,6 +1170,14 @@ MIT License - see LICENSE file for details
 ---
 
 ## Version
+
+**v0.3** - Metacognitive Refinements (Nov 2025)
+- Ghost memory deletion with soft-delete pattern
+- Persistent chat log database
+- Vector-driven auto-linking
+- User-driven session context
+- Metacognition service foundation
+- The Synthesizer foundation (MOC generation)
 
 **v0.2** - Release with Obsidian RAG Pipeline, Prompt RAG Layer, and Intelligence OS
 
