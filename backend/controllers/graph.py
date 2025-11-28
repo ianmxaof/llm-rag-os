@@ -84,7 +84,12 @@ def get_nodes(
                 # Get enriched metadata from first chunk
                 doc_title = meta.get("title", filename)
                 doc_summary = meta.get("summary", "")
-                doc_tags = meta.get("tags", [])
+                # Handle tags as comma-separated string or list (backward compatibility)
+                tags_str = meta.get("tags", "")
+                if isinstance(tags_str, list):
+                    doc_tags = tags_str  # Old format (list)
+                else:
+                    doc_tags = [t.strip() for t in tags_str.split(",")] if tags_str else []  # New format (string)
                 doc_quality = meta.get("quality_score", 0.7)
                 
                 nodes.append({
@@ -103,7 +108,12 @@ def get_nodes(
 
             # Chunk node
             quality = meta.get("quality_score", 0.7)
-            meta_tags = meta.get("tags", [])
+            # Handle tags as comma-separated string or list (backward compatibility)
+            tags_str = meta.get("tags", "")
+            if isinstance(tags_str, list):
+                meta_tags = tags_str  # Old format (list)
+            else:
+                meta_tags = [t.strip() for t in tags_str.split(",")] if tags_str else []  # New format (string)
             
             # Filter by quality
             if quality < min_quality:

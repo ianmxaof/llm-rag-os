@@ -1,0 +1,701 @@
+Okay. So, you are checking for SSIDs,
+you're checking for MAC addresses. Is
+that right?
+Correct.
+Did you say doing something with
+Bluetooth as well?
+Yeah, Bluetooth. Exactly. We're checking
+for Bluetooth the same way as we're
+checking for Wi-Fi because once again
+comes back to the even a nationstate
+group, even a group of trained operators
+are likely going to have cell phones.
+Is this free? Is it open source or do I
+have to pay a bunch of money to get hold
+of this?
+It is 100% free. It is open source. And
+this is not a government thing. Private
+sector does it too. We have a horrible
+habit of naming our you Wi-Fi the names
+of our specialty units.
+Chasing your tail update // How it started
+Everyone, David Bumble coming to you
+from Black Hat with a very special
+guest. Matt, great to have you on the
+show.
+Dave, thanks for having me. It's Lana.
+So, I remember you showing this demo and
+I'm really excited to see the update for
+it. Tell me, well, take us on the
+journey, right? If I understand
+correctly, using a Raspberry Pi to make
+sure that people aren't following you or
+something like that.
+Yes, correct. So, it's funny. I give it
+a lot of conference talks and I never
+really spend time at the beginning
+talking about the motivation for the
+stock or the story behind it. This one
+was different because I think it's
+really a key piece of the story. And
+what it is is no one likes to be how
+this all started is many many years ago,
+no one likes to be surprised by their
+boss showing up unannounced. And so they
+moved me to a warehouse in the back
+corner of a military base. And so what I
+did, I built a small wireless device
+that let me know anytime my boss was
+going to be in the area.
+my boss enter the building, it would
+give me the heads up. Not that I was
+doing anything wrong, just no one likes
+surprises.
+So you looking for SSID or something?
+Exactly. MAC address is coming off, SSID
+is coming off. Exactly. Because some
+things randomize, but you can't account
+for that. So you kind of got to look
+both ways. And so I had given a talk for
+the government and I theorized on using
+that to tell if you were being followed
+because if you think about it, even a
+nation state, very well-trained group,
+they're going to have cell phones in
+their pockets, right? They're going to
+have TPMS sensors in the tires. they're
+going to have Bluetooth headsets. And so
+I basically said, "Hey, I'm just going
+to go to three different locations and
+then see what devices were at all
+three." Fast forward many years later, a
+acquaintance of mine who worked for a
+separate government agency came to me.
+They had a confidential informant with
+ties to a very legitimate terrorist
+organization that we are all aware of.
+Yeah. And this person, they weren't
+worried about their own safety. They
+were worried about the safety of their
+informant. They were afraid that if they
+were followed, it would get their
+informant killed. He said he asked his
+agency's tech people. They had nothing
+like that. He looked for it, couldn't
+find anything. So, he was like, "Hey, do
+you know of anything?" And I thought and
+I looked and I said, "No." I said, "If
+you give me a couple weeks, I think I
+can actually build it for you." And so,
+that's kind of uh where it led. And I I
+got to tell you, it blew up way bigger
+than I thought. Speaking here at Black
+Hat Wire did an article on me. And the
+emails that I got for still to this day,
+people um using it for search and
+rescue. I think one of the biggest
+tearjerkers was a gentleman who reached
+out and said his wife was uh worked in
+an emergency room in a hospital. Okay.
+And pretty much every week doctors and
+nurses there were getting death threats
+from people and they were using this to
+help give him a little piece of mind.
+And he's like your device is helping
+people safe like feel safe. And I was
+just like helping people sleep. It's
+like it's getting dusty in here. You
+know, I'm trying I'm sitting there at my
+desk in my office like trying to fight
+back a little tear reading this email.
+So it's been amazing. It has been and to
+say like the improved and updated
+version. I wrote this before AI. It was
+me writing the code and I am a lot of
+things. A programmer is not one of them.
+And so now that we have AI to help me
+write the code, an update was long
+Threatlocker sponsored segment
+overdue. I really want to thank Danny
+and the team at Straight Locker for
+sponsoring my trip to Black Hat and
+allowing me to enjoy this amazing
+conference. Deny by default is the way
+that we need to implement security these
+days. You cannot permit everything and
+then try and find the bad traffic in
+2025. Deny by default. So I'm sure
+What's in the box and how it works
+everyone's interested. Tell us what's in
+the box and you know explain what's
+going on.
+Yeah, the original version if you go
+back and look at the talk was much much
+smaller than this. I'm presenting it
+here at Black Hat Arsenal and so I
+wanted a little bit bigger form factor
+so people could actually see it and
+sitting there. So yeah. So we have a
+small Raspberry Pi 5 right there hooked
+up to a little alpha wireless card.
+There's four USBs if you wanted to plug
+more in. This is actually a Bluetooth
+GPS.
+So the original version that you that I
+saw was only doing Wi-Fi, but you're
+doing more than that now.
+It was doing Wi-Fi and Bluetooth. This
+is doing both. So the purpose of the GPS
+is this. One of the things that I really
+wanted to one of the natural evolutions
+in my mind was listen, if someone is
+following you, can we flip it around?
+Can we tell where they hang out? Can we
+tell where they spend their time? Maybe
+where they work. And the answer is many
+times absolutely. And so with this, with
+having the GPS enabled, you can go back.
+This can generate reports of where you
+were followed, what the devices were,
+and then if you give it a Wiggle API
+key. It actually goes out to Wiggle and
+it queries the networks that the devices
+were following you, the where are they
+located, and you can flip it around. So,
+I had a buddy of mine test it. He is
+still federal law enforcement, I would
+say, what agency, but I had him kind of
+follow me around and do this. And then I
+went and looked and it's like, "Okay,
+yep. It saw the device following me. Saw
+this name of this unique Wi-Fi that it
+was looking for, do the probe requests,
+put it in there, and it's a building
+where at the front it's no ties to the
+government. If you Google it, it will
+say what government agency it is." And
+so I didn't want to blow up anyone's
+spot, but absolutely like cuz his phone
+had been there because he works there
+sometimes. So
+wow.
+Yeah, that was kind of cool.
+So just a Raspberry Pi, right?
+It is. And honestly, it's anything that
+could run Kismmet. So even a Raspberry
+Pi 50, anything else similar to a
+Raspberry 5, anything that can run
+Kismmet, which is fairly lowowered, this
+can work with.
+And you got a screen that's just
+connected to the to the Raspberry Pi.
+Um, I don't want to put words in your
+mouth, so just take us on a journey,
+right? So So explain why you need the
+screen and why the interface looks like
+the way it does.
+Why the interface looks like it's a
+FisherPrice toy, Dave. You can say it.
+You can say it.
+No, not at all.
+I mentioned that in my original talk.
+It's funny is originally when I thought
+this up, I was going off location like
+location one, location two, location 3.
+Very quickly I realized that does not
+work in the desert when you're driving
+for maybe an hour, hour and a half
+straight. And so what I had to do is I
+have to shift from locations. Do I have
+to shift to temporal? Am I seeing any
+devices now that I also saw 5 to 10
+minutes ago, 15 to 10 minutes ago, etc.
+And once again, if you think about it,
+this is designed for an individual maybe
+by themselves driving at a high rate of
+speed. I I can't have them on a small
+screen going through menus looking a lot
+of options. And so I have big massive
+buttons that even me with my big paw can
+tap on correct and hit the correct
+button. So that's why the interface
+kinds of looks the way it does. And so
+there's also a little bit of logic in
+here. For instance, you see things like
+delete lists and ignore lists. And so
+Dave, if you and I if we were going to
+go do surveillance, if we were going to
+follow someone or we were maybe wanted
+this to see if we were being followed,
+what we would do is we would go into the
+car, right? get set up, have all of our
+equipment there, everything turned on,
+leave this running for a couple minutes,
+and then we would create the ignore
+list. And so basically what we've done
+then is everything you've seen up to
+this point since I started you up,
+ignore it, never alert on it.
+You didn't see anything,
+right? Otherwise, we're alerting on
+oursel.
+Yeah, exactly.
+So yeah, we have the create the ignore
+list, delete the ignore list, a check
+system status, start chasing your tail,
+which we can push that right now and
+start it up. That was all in the
+original. Now the difference is one of
+the things that I wanted to do with this
+code is to really add the post analysis
+to be able to add in the GPS data as I
+said to be able to create maps of what
+your route of travel was. Yeah. Where
+you were being followed what devices you
+saw and then basically flipping it
+around on the purple little following
+you. Okay. Where are they going to where
+they Yeah,
+that is really good.
+It is.
+Matt, before we go any further, I got to
+"It's basically free to build it" // Components used
+ask you, is this free? Is it open source
+or do I have to pay a bunch of money to
+get hold of this?
+It is 100% free. It is open source.
+Before you had to deal with my horrible,
+horrible Python code.
+It's horrible. Horrible.
+Just horrible.
+As you can see, the uh sticker right
+there. Now, AI has helped me improve the
+code quite a bit. So, it is free open
+source. I think it's um I I got to tell
+you, if you're in this space, David, be
+perfectly honest with you. Now, I'm
+going to flip it around. I'm going to
+ask you a question. How many Raspberry
+Pies do you have laying around your
+house doing absolutely nothing right?
+I don't want to even say cuz I, as a
+content creator, I have way too many. I
+must have at least 10 of them. Exactly.
+I think I have five. That's why it's
+funny. The person I gave this to is
+like, "How much do I owe you?" Like,
+"You don't owe me anything." And I'm
+like, "I have like five of these laying
+around my house." I think we pretty much
+all have a Raspberry Pi. Get that up and
+running. Get Kisman on it. Hook it up to
+a small screen, which depending on the
+form factor, the size, $ 20, $30 on
+Amazon. A lot of us probably have some
+Alpha or Panda wireless cards capable of
+being put in monitor mode as well too.
+We got to hook up to it. And then you're
+good. If you want a GPS, those USB are
+usually $10 or so on eBay. If you want
+to get a Bluetooth, which is obviously
+nice in a vehicle, depending on how
+you're going to use it, I was able to
+get the Bluetooth GPS on this for about
+$50 on eBay. So,
+yeah, cuz I saw you got an Alpha
+adapter. I think you the story was you
+went and asked the community, right,
+which adapter?
+Exactly. Yeah. I mean, there's these
+people that do this and they just swim
+in these waters deeply every day and
+they're far deeper in the tech than I
+am. So if we don't reach out and
+leverage and ask them what they're
+using, what they're having great success
+with, I'm being a And so yeah,
+the alpha, the panda, those are usually
+the two best recommendations. As
+long as they support monitoring and
+injection.
+Exactly. You just got to be able to put
+it. We don't even need injection for
+this. Yeah, we just got to be able to
+put it in monitor mode. So
+What coding language it runs on
+So Matt, let's get a bit technical.
+Right. So it's Kismmet is what you're
+using on the back end,
+correct?
+Is it a Python script? Because the last
+time I saw this, you you wrote a Python
+script. Is that what you're still doing
+or has it been changed, updated?
+Correct. Yeah. And if you're not
+familiar with Kisman, Kisman is an
+amazing free open- source tool that
+works with wireless, it works with
+Bluetooth, it works with some software
+defined radios, and it brings everything
+in. It gives you a nice menu. And what
+it does is it saves everything into
+something that's akismmet file. Now,
+it's akismmet file, but really all it is
+is a SQLite database. And so, real time,
+I don't have to worry about processing
+Wi-Fi, Bluetooth, being able to bring in
+software to find radios for other radio
+types. I can just use kismmet and then
+parse that database real time. And so
+then the code itself is actually a
+Python script. It used to be one single
+script. Now it's a collection of
+scripts. With the help of AI, I was able
+to make it much more modular. It'll be
+much easier for other people to
+contribute to the project to be able to
+add into additional functionality. But
+yeah, it's just a collection of Python
+scripts that grabs the data from the DB,
+performs some analysis on it, starts
+looking for devices, and then generates
+obviously, like I said, the post reports
+for the maps and the things like that.
+But it's all Python.
+Sorry, the code is on GitHub. Is that
+right?
+It is. It's posture on GitHub. So, yeah.
+Okay, great. So, people can just
+download it.
+Absolutely. Chasing your tail.
+Just need a Raspberry Pi. Yes. So,
+Chasing Your Tail.
+Yeah, it's under my Argalius Labs, my
+small consulting company. It's on our
+GitHub. If you check that out, it's
+right there. So,
+I'll put links below. Yep. Um, so just
+any does it have to be a really modern
+Raspberry Pi or is it
+It does not. The original one was either
+on a two or a three, I forget. This is a
+five. I haven't tried it yet, but it
+should run fine on a zero. I think
+Kismmet right now when it's humming uses
+up about 25% of the CPU on this, so it's
+not nothing, but anything Kismmet will
+run on, this will run on because the
+code itself is actually very, very
+lightweight.
+So when you set this up, I mean, you
+obviously had an adapter, you had the
+Raspberry Pi, so there was only the
+monitor that cost you about $20 or
+something, right?
+Exactly. Exactly. And obviously this is
+a much bigger smaller form or a much
+larger form factor because it's going to
+be sitting in a booth where people
+standing around so they can see the
+screen, but the original one is much
+much tighter than this. Much much
+smaller and tighter. So
+Unique network IDs in real life
+So this is YouTube and sometimes the
+comments on YouTube aren't don't meet
+reality. So I'm going to I'm going to
+hit you with some of the comments that
+I'm sure we're going to get.
+Let it rip.
+Matt, no one's going to use a unique ID,
+especially if they work for the
+military. So you're not going to be able
+to find them. I have to tell you, I have
+been in rooms where I was the only one
+there who was not an SF operator. And
+this is not a government thing. Private
+sector does it too. We have a horrible
+habit of naming our you Wi-Fi the names
+of our specialty units. So, I've sat
+there in rooms where literally I was the
+only one that was not a special forces
+operator. And I love these guys. They're
+all my friends. I talked to them all.
+And it's like, okay, which one of you
+guys is stationed in 10th Mountain?
+Which one of you guys is a firstteamer?
+Which one of you guys? We had a
+lieutenant colonel walk in. His name was
+Chris and he was hanging out in the
+room. Very nice guy. After a couple
+minutes, I pull up on Google Maps a
+house. I'm like, "Sir, is this your
+house?" He's like,
+"Oh, wow."
+Yeah. Yeah, it is. So,
+and that's Wiggle that you found. You
+found the address, right?
+Exactly. Yeah, it's Wiggle. So,
+obviously, if you have a MAC address, if
+you're performing forensics, then it's
+no ambiguity. If you're going off Wi-Fi
+names, which is all you have for a probe
+request, then it's obviously depending
+on the if it's just Starbucks, if it's
+Lynxis, you're not. But once again, we
+have a horrible, horrible habit of
+naming our Wi-Fi names that are funny
+and clever and unique, trying to impress
+our neighbors and friends. Funny and
+clever is great. Unique is not.
+Okay, but what about MAC addresses?
+Tracking MAC addresses
+Right? Because phones randomize the MAC
+addresses, and I'm assuming you're
+looking for someone carrying a phone in
+their pocket or something like that. So,
+how do you how do you manage that? cuz
+the MAC address could be changing all
+the time.
+Exactly. So, one nice thing about living
+in the desert like I do, Dave, is it's
+very easy for me to get away from
+everyone and everything and just start
+turning on devices and seeing what
+happens. And the iPhone in my pocket
+right now for probe requests, it was
+literally randomizing the Mac per every
+request. Every once in a while, I double
+dip and use it twice, but otherwise,
+every single request as I'm going
+through the pcaps and look at what's
+going on. And so a lot of people think
+that well that solves this problem.
+Randomize back solves the problem. But
+what they don't think about is it's the
+name of the networks you're looking for.
+Okay?
+So even if nothing sits there and shouts
+out Matt's house,
+right? Starbucks where Dave hangs out.
+It's the signature of like I don't care
+what MAC addresses you're using. When I
+see a device come in looking for these
+five things and I know it's yours, I
+know that's your device there. And that
+itself becomes a signature. I was doing
+a site assessment several years ago for
+a um government building here in the
+United States. And as I walked around
+the building, I was wearing some baggie
+jeans. I had everything running on a
+tablet. So, I just put it in my back
+pocket. And afterwards, you could see
+obviously where a lot of people worked
+to where a lot of people vacationed,
+hung out, etc. And I noticed that a lot
+of devices were looking for a network
+name that was very, very unique, but I
+had no idea what it was. It didn't give
+away the name of something. But when I
+put that into Wiggle, it was actually
+the federal courthouse up in Tempe in
+Phoenix, Arizona. And so just the fact
+of even if you don't know their names,
+if you if you didn't know what agency
+they work for, they're at the federal
+courthouse in Phoenix often enough that
+they've got that saved on there. And so
+that was one of the things that I would
+the reason I was doing that is they
+wanted me to present it from a force
+protection, from an awareness. It's
+like, you know, normally when I'm
+walking through the mall, when I'm
+walking through Costco, if my phone is
+broadcasting out where I look for, I I
+don't really care. But obviously when
+you come to places like hacker
+conventions or you go into countries
+where maybe we're not the most favored
+then you know you want to think about
+shutting that off.
+How to know who is tailing you
+So explain the five I think it's 5
+minute 10 minute 15 minute or something.
+Explain what that's about because I'm
+assuming that's how you know if
+someone's tracking you or following you
+right
+exactly as I said earlier the um my
+original thought was location. I'm going
+to go to location one. Going to go to
+location two. Going to location three.
+In a big city that works great. But with
+the environment that this was in when it
+was a desert and you'd be me driving for
+60, 90, 120 minutes, there are no
+locations. And so then, like I said, I
+had to quickly shift to temporal.
+I had to say, do I see a device right
+now within the past minute
+that I also saw 5 to 10 minutes ago that
+I also saw 15 to, you know, 10 to 15
+minutes ago, 15 to 20 minutes ago. Cuz
+if so,
+that's, you know, something worth
+noting. Exactly. Something worth noting.
+There's something going on. So,
+How the device have helped people
+Matt, I got to ask you stories. Have you
+got any examples where people have used
+this and told you like, "Okay, I found
+out some interesting things."
+Uh, have I had any stories where I found
+out interesting things. The best results
+I've had is people using it for search
+and rescue. They've all been
+heartwarming. They've been good stories
+using it for search and rescue, which I
+found. I was in Washington DC a uh this
+is just about a month ago and at this
+point my black tack talk was three years
+ago this event and I had someone I don't
+want to say what agency it was but I had
+someone coming up to me and they said
+hey you're the guy from chasing your
+tail and I said yeah I am he's like and
+the agency he worked for one of their
+huge mandates is force protection
+protecting executives protecting
+facilities he's like oh no that was like
+a siminal talk for us and we actually
+like oh yeah no we basing a lot of stuff
+off that and everything I'm like I'm
+actually presenting an updated version
+this year. So, good news for you if
+you've tried to get up and running.
+There's some great improvements. So,
+yeah, it's been some of that. I haven't
+ever had the um thankfully in a lot of
+ways I haven't ever had the oh, I found
+a stalker because of you. It was just
+more of like I said, helping people have
+a little bit of a peace of mind from the
+ER search and rescue or protecting
+locations. Those have been the uh I
+think my favorite stories that I've
+gotten back so far.
+Okay. So, you are checking for SSIDs,
+Tracking Bluetooth
+you're checking for MAC addresses, is
+that right? Correct.
+Did you say doing something with
+Bluetooth as well?
+Yeah, Bluetooth. Exactly. You were
+checking for Bluetooth the same way as
+we're checking for Wi-Fi because once
+again comes back to the even a
+nationstate group, even a group of
+trained operators are likely going to
+have cell phones. A lot of us have
+Bluetooth headsets now, AirPods or
+those, etc. And so that's one of those
+things that we can start to track for
+too. And anything that Kismmet can
+detect, we can start to look for. So we
+can easily modify this to just start
+looking for air tags too
+because you were mentioning about tires.
+Sorry to interrupt you. So, Oh, no, no,
+yeah, the tires, that's another thing.
+It's um fairly short distance, but the
+uh the low pressure sensors and tires,
+the TPMS, that is actually if you want
+to go software defined radio route
+capability in this, that can be
+something you could look for, too.
+Obviously, it's got a little bit shorter
+distance. It's a little longer than
+people think. Like, you can still detect
+it from your house of cars going by your
+road if your house is fairly closer to
+your road. So, it's a little bit longer
+than just like 6 ft away, but it's Wi-Fi
+and Bluetooth. You're going to get
+better range.
+Okay. So, cell phones, um, any Bluetooth
+device like headsets, stuff like that,
+tires on cars, anything that's basically
+giving a signal, Bluetooth or Wi-Fi.
+Exactly. A lot of people don't realize
+now too. This is the way a lot of
+detecting, one of the things that I
+teach is detecting modern drones and
+modern drones now are giving out that
+beacon on a lot of usually now it's long
+range Bluetooth. People think of
+Bluetooth, right? We think about it as
+something for our keyboards or think
+about something as our AirPods. No,
+we're detecting drones a kilometer out
+on a device that costs less than $100 to
+build.
+Reach out to Matthew Edmondson
+Do you want people to reach out to you
+or you you don't want
+that? They're welcome to. Yeah, I got so
+many people reaching out to me last
+time. And it was funny. I've since
+retired from the government, but at that
+point, I was a federal agent. I was a
+federal agent for 22 years. And I had so
+many people, it's comical, reaching out
+to me. It's like, well, how do I know
+you're really the one from Black Hat and
+Wired? How do I know? How do I know
+you're not a Fed? And I'm like, I am
+literally a Fed.
+I said that in my talk. So,
+so I mean assuming that no one's wanted
+by the FBI, can they reach out to you on
+like LinkedIn or somewhere?
+Absolutely. I am the world's easiest
+person to get a hold of on LinkedIn on
+Twitter. My account name is Matt0177
+everywhere. So, if you uh if you can't
+get a hold of me, you're not trying.
+Matt, you were demoing this at Sorry,
+Black Hat Arsenal explained
+you are demoing this at the Arsenal
+section in Black Hat. What is What is
+the Arsenal section about?
+Arsenal is fantastic. So, you can
+present to Blackat on a variety of
+topics. Arsenal is down here in the
+business hall. So pretty much anyone
+with any form of Black Hat Pass can get
+to it. And it's basically it's a new
+tool or an updated tool that you have
+that you want to share with the
+community. So it's got to be open
+source. It's the focus has to be on the
+tool, not a company. Right. It can't be
+a thinly veiled way to just Exactly.
+trying to sell a product or anything. It
+has to be open source. The focus has to
+be on a tool. And it's constantly
+rotating. So you'll go there, you'll see
+everything they have, and there's be
+like 10 different booths. Then you'll
+come back an hour and a half later and
+it's 10 new tools. So I always every
+time I come to black hat always pop my
+head into Arsenal and walk around and
+always find out like oh that's kind of
+cool. So yeah I've never actually
+presented at Arsenal before. This will
+be my first time. So I'm excited.
+Conclusion
+De thanks so much for sharing
+it. Thank you. Appreciate him.

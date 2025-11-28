@@ -9,11 +9,17 @@ import logging
 from typing import List
 
 try:
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    # Try new langchain 1.x import path first
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
     LANGCHAIN_AVAILABLE = True
 except ImportError:
-    LANGCHAIN_AVAILABLE = False
-    logging.warning("langchain not available. Install with: pip install langchain")
+    try:
+        # Fallback to old langchain 0.x import path
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        LANGCHAIN_AVAILABLE = True
+    except ImportError:
+        LANGCHAIN_AVAILABLE = False
+        logging.warning("langchain not available. Install with: pip install langchain langchain-text-splitters")
 
 from scripts.config import config
 

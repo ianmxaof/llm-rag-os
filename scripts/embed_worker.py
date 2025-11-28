@@ -17,7 +17,7 @@ import chromadb
 from scripts.config import config
 from scripts.preprocess import preprocess_text
 from scripts.enrichment import enrich_document
-from backend.controllers.ollama import embed_texts
+from backend.controllers.ollama import embed_texts, force_unload_model
 
 # Try watchdog for file monitoring
 try:
@@ -33,6 +33,49 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Warm model tracking for sustained mode optimization
+_model_last_used: dict[str, float] = {}
+
+
+def should_use_sustained_mode(file_path: Path) -> tuple[bool, int, str]:
+    """
+    Determine if a file should use sustained model loading based on heuristics.
+    
+    Args:
+        file_path: Path to the file to check
+        
+    Returns:
+        Tuple of (use_sustained: bool, estimated_chunks: int, reason: str)
+    """
+    try:
+        size_kb = file_path.stat().st_size / 1024
+        name = file_path.name.lower()
+        
+        # Heuristic 1: Raw size >800 KB
+        if size_kb > 800:
+            est_chunks = int(size_kb * 1.5)  # Rough estimate: ~1.5 chunks per KB
+            return True, est_chunks, f"{size_kb:.1f} KB file size"
+        
+        # Heuristic 2: Dense patterns >400 KB
+        dense_patterns = ["cursor_", "chatlog_", "export_", "history", "log", "session"]
+        if size_kb > 400 and any(p in name for p in dense_patterns):
+            est_chunks = int(size_kb * 1.5)
+            return True, est_chunks, f"{size_kb:.1f} KB + dense pattern ({', '.join([p for p in dense_patterns if p in name])})"
+        
+        # Heuristic 3: Accurate chunk count estimation
+        try:
+            text = file_path.read_text(encoding="utf-8")
+            est_chunks = len(text) // 1400 + 1  # ~1500 chars per chunk
+            if est_chunks > 600:
+                return True, est_chunks, f"{est_chunks} estimated chunks"
+        except Exception:
+            pass
+        
+        return False, 0, ""
+    except Exception as e:
+        logger.warning(f"Error in should_use_sustained_mode: {e}")
+        return False, 0, ""
 
 
 def file_hash(path: Path) -> str:
@@ -54,23 +97,38 @@ def file_hash(path: Path) -> str:
 def embed_and_upsert(md_path: Path, batch_size: int = None):
     """
     Preprocess, embed, and upsert a markdown file to ChromaDB.
+    Implements dual-model lifecycle control for sustained mode.
     
     Args:
         md_path: Path to markdown file
         batch_size: Batch size for embedding (defaults to config.EMBED_BATCH_SIZE)
+        
+    Returns:
+        Dict with success status and metadata (sustained_mode, estimated_chunks, reason)
     """
     batch_size = batch_size or config.EMBED_BATCH_SIZE
+    
+    # Detect if sustained mode should be used
+    use_sustained, est_chunks, reason = should_use_sustained_mode(md_path)
+    sustained_mode_used = False
     
     try:
         # Read markdown file
         text = md_path.read_text(encoding="utf-8")
     except Exception as e:
         logger.error(f"Failed to read {md_path}: {e}")
-        return False
+        return {"success": False, "sustained_mode": False, "estimated_chunks": 0, "reason": ""}
+    
+    # Enrichment phase: use chat model with keep_alive if sustained mode
+    chat_keep_alive = "10m" if use_sustained else None
+    if use_sustained:
+        logger.info(f"🚀 Sustained mode activated for {md_path.name}: {reason}")
+        logger.info(f"   Estimated chunks: {est_chunks}")
+        sustained_mode_used = True
     
     # Enrich document with metadata (tags, summary, title, quality score)
     logger.info(f"Enriching document: {md_path.name}")
-    enrichment_result = enrich_document(text)
+    enrichment_result = enrich_document(text, keep_alive=chat_keep_alive)
     
     # Quality gate: check if enrichment failed
     if "retry" in enrichment_result and enrichment_result.get("retry"):
@@ -83,7 +141,15 @@ def embed_and_upsert(md_path: Path, batch_size: int = None):
             logger.info(f"Moved failed file to error directory: {error_path}")
         except Exception as e:
             logger.error(f"Failed to move file to error directory: {e}")
-        return False
+        # Cleanup models if sustained mode was used
+        if sustained_mode_used:
+            try:
+                force_unload_model(config.OLLAMA_CHAT_MODEL, "1s")
+                time.sleep(0.5)
+                force_unload_model(config.OLLAMA_EMBED_MODEL, "1s")
+            except Exception as e:
+                logger.warning(f"Error during cleanup: {e}")
+        return {"success": False, "sustained_mode": sustained_mode_used, "estimated_chunks": est_chunks, "reason": reason}
     
     # Extract enrichment metadata
     doc_summary = enrichment_result.get("summary", "")
@@ -96,7 +162,15 @@ def embed_and_upsert(md_path: Path, batch_size: int = None):
     chunks = preprocess_text(text, clean=True)
     if not chunks:
         logger.warning(f"No chunks created for {md_path}")
-        return False
+        # Cleanup models if sustained mode was used
+        if sustained_mode_used:
+            try:
+                force_unload_model(config.OLLAMA_CHAT_MODEL, "1s")
+                time.sleep(0.5)
+                force_unload_model(config.OLLAMA_EMBED_MODEL, "1s")
+            except Exception as e:
+                logger.warning(f"Error during cleanup: {e}")
+        return {"success": False, "sustained_mode": sustained_mode_used, "estimated_chunks": est_chunks, "reason": reason}
     
     # Compute file hash for deduplication
     file_hash_val = file_hash(md_path)
@@ -114,15 +188,21 @@ def embed_and_upsert(md_path: Path, batch_size: int = None):
         all_metadatas = []
         all_embeddings = []
         
+        # Embedding phase: use embedding model with keep_alive if sustained mode
+        embed_keep_alive = "8m" if use_sustained else None
+        
         logger.info(f"Starting embedding process for {len(chunks)} chunks using {config.OLLAMA_EMBED_MODEL}")
         
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]
             
-            # Use Ollama to embed the batch (auto-loads model, embeds, then unloads)
+            # Use Ollama to embed the batch with keep_alive if sustained mode
             logger.info(f"Embedding batch {i//batch_size + 1} ({len(batch)} chunks)...")
-            batch_embeddings = embed_texts(batch, model=config.OLLAMA_EMBED_MODEL)
-            logger.info(f"Batch {i//batch_size + 1} embedded successfully. Model unloaded.")
+            batch_embeddings = embed_texts(batch, model=config.OLLAMA_EMBED_MODEL, keep_alive=embed_keep_alive)
+            if use_sustained:
+                logger.info(f"Batch {i//batch_size + 1} embedded successfully. Model kept alive.")
+            else:
+                logger.info(f"Batch {i//batch_size + 1} embedded successfully. Model unloaded.")
             
             for j, (chunk, embedding) in enumerate(zip(batch, batch_embeddings)):
                 chunk_id = f"{file_hash_val}_{i+j}"
@@ -136,7 +216,7 @@ def embed_and_upsert(md_path: Path, batch_size: int = None):
                     "file_hash": file_hash_val,
                     "title": doc_title,
                     "summary": doc_summary,
-                    "tags": doc_tags,  # ChromaDB will handle list serialization
+                    "tags": ", ".join(doc_tags) if doc_tags else "",  # ChromaDB requires scalar values (comma-separated string)
                     "quality_score": quality_score,
                     "ingest_ts": ingest_ts
                 }
@@ -152,6 +232,17 @@ def embed_and_upsert(md_path: Path, batch_size: int = None):
         )
         
         logger.info(f"Indexed {len(chunks)} chunks from {md_path.name}")
+        
+        # Cleanup: force unload models if sustained mode was used
+        if sustained_mode_used:
+            try:
+                logger.info("Cleaning up models after sustained mode ingestion...")
+                force_unload_model(config.OLLAMA_CHAT_MODEL, "1s")
+                time.sleep(0.5)
+                force_unload_model(config.OLLAMA_EMBED_MODEL, "1s")
+                logger.info("Models unloaded successfully")
+            except Exception as e:
+                logger.warning(f"Error during model cleanup: {e} — OS will reclaim on exit")
         
         # Archive the processed file
         try:
@@ -207,11 +298,24 @@ def embed_and_upsert(md_path: Path, batch_size: int = None):
         except Exception as e:
             logger.warning(f"Could not archive {md_path}: {e}")
         
-        return True
+        return {
+            "success": True,
+            "sustained_mode": sustained_mode_used,
+            "estimated_chunks": est_chunks,
+            "reason": reason
+        }
         
     except Exception as e:
         logger.error(f"Error embedding {md_path}: {e}")
-        return False
+        # Cleanup models if sustained mode was used
+        if sustained_mode_used:
+            try:
+                force_unload_model(config.OLLAMA_CHAT_MODEL, "1s")
+                time.sleep(0.5)
+                force_unload_model(config.OLLAMA_EMBED_MODEL, "1s")
+            except Exception as cleanup_error:
+                logger.warning(f"Error during cleanup: {cleanup_error}")
+        return {"success": False, "sustained_mode": sustained_mode_used, "estimated_chunks": est_chunks, "reason": reason}
 
 
 class MarkdownHandler(FileSystemEventHandler):

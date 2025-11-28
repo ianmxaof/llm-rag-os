@@ -5,6 +5,7 @@ Main FastAPI app with CORS, logging, and route registration.
 """
 
 import logging
+import sys
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +20,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Log which Python interpreter is being used (critical for debugging venv issues)
+print(f"BACKEND STARTED WITH PYTHON: {sys.executable}")
+logger.info(f"Python interpreter: {sys.executable}")
 
 # Initialize database on startup
 init_db()

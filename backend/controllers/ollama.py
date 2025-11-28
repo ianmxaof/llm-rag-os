@@ -22,6 +22,9 @@ router = APIRouter()
 # Track last usage time for auto-unload
 _last_used: Dict[str, float] = {}
 
+# Warm model tracking for sustained mode optimization
+_model_last_used: Dict[str, float] = {}
+
 
 def is_ollama_running() -> bool:
     """Check if Ollama server is running."""
@@ -122,6 +125,8 @@ def unload_model(model: str) -> tuple[bool, str]:
         # For now, we'll just remove from tracking
         if model in _last_used:
             del _last_used[model]
+        if model in _model_last_used:
+            del _model_last_used[model]
         
         logger.info(f"Model {model} marked for unload (Ollama will free memory automatically)")
         return True, f"Model {model} unloaded (memory will be freed by Ollama)"
@@ -131,13 +136,42 @@ def unload_model(model: str) -> tuple[bool, str]:
         return False, f"Error unloading model: {str(e)}"
 
 
-def embed_texts(texts: List[str], model: str = None) -> List[List[float]]:
+def force_unload_model(model: str, keep_alive: str = "1s") -> None:
+    """
+    Force unload a model by sending a ping request with minimal keep_alive.
+    
+    Args:
+        model: Model name to unload
+        keep_alive: Keep alive duration (default "1s" for immediate unload)
+    """
+    try:
+        logger.info(f"Force unloading model {model}...")
+        response = requests.post(
+            f"{config.OLLAMA_API_BASE}/generate",
+            json={
+                "model": model,
+                "prompt": "ping",
+                "options": {"keep_alive": keep_alive},
+                "stream": False
+            },
+            timeout=5
+        )
+        if response.status_code == 200:
+            logger.info(f"Model {model} force unloaded successfully")
+        else:
+            logger.warning(f"Force unload returned status {response.status_code}: {response.text}")
+    except Exception as e:
+        logger.warning(f"Failed to force unload {model}: {e} — OS will reclaim on exit")
+
+
+def embed_texts(texts: List[str], model: str = None, keep_alive: Optional[str] = None) -> List[List[float]]:
     """
     Embed a list of texts using Ollama.
     
     Args:
         texts: List of text strings to embed
         model: Model name (defaults to config.OLLAMA_EMBED_MODEL)
+        keep_alive: Optional keep_alive duration (e.g., "10m", "8m"). If None, model unloads after use.
         
     Returns:
         List of embedding vectors (each is a list of floats)
@@ -148,6 +182,13 @@ def embed_texts(texts: List[str], model: str = None) -> List[List[float]]:
         return []
     
     try:
+        # Warm model detection: if model was used <60s ago, extend keep_alive
+        if keep_alive is None and model in _model_last_used:
+            time_since_use = time.time() - _model_last_used[model]
+            if time_since_use < 60:
+                keep_alive = "10m"
+                logger.debug(f"Model {model} was used {time_since_use:.1f}s ago, extending keep_alive to 10m")
+        
         # Ensure model is loaded
         if not is_model_loaded(model):
             success, msg = load_model(model)
@@ -155,6 +196,7 @@ def embed_texts(texts: List[str], model: str = None) -> List[List[float]]:
                 raise RuntimeError(f"Failed to load model: {msg}")
         
         _last_used[model] = time.time()
+        _model_last_used[model] = time.time()
         
         logger.info(f"Embedding {len(texts)} chunks with {model}...")
         
@@ -162,13 +204,18 @@ def embed_texts(texts: List[str], model: str = None) -> List[List[float]]:
         # or batch them if the API supports it
         embeddings = []
         
+        request_json = {
+            "model": model,
+            "prompt": ""  # Will be set per text
+        }
+        if keep_alive:
+            request_json["options"] = {"keep_alive": keep_alive}
+        
         for text in texts:
+            request_json["prompt"] = text
             response = requests.post(
                 f"{config.OLLAMA_API_BASE}/embeddings",
-                json={
-                    "model": model,
-                    "prompt": text
-                },
+                json=request_json,
                 timeout=60
             )
             
@@ -185,10 +232,13 @@ def embed_texts(texts: List[str], model: str = None) -> List[List[float]]:
         
         logger.info(f"Successfully embedded {len(embeddings)} chunks")
         
-        # Unload model after embedding to free RAM immediately
-        logger.info(f"Unloading {model} to free RAM...")
-        unload_model(model)
-        logger.info(f"Model {model} unloaded. RAM should be freed by Ollama.")
+        # Only unload if keep_alive is not set (sustained mode)
+        if not keep_alive:
+            logger.info(f"Unloading {model} to free RAM...")
+            unload_model(model)
+            logger.info(f"Model {model} unloaded. RAM should be freed by Ollama.")
+        else:
+            logger.debug(f"Model {model} kept alive with keep_alive={keep_alive}")
         
         return embeddings
         
@@ -197,7 +247,7 @@ def embed_texts(texts: List[str], model: str = None) -> List[List[float]]:
         raise
 
 
-def chat(prompt: str, model: str = None, stream: bool = False) -> str:
+def chat(prompt: str, model: str = None, stream: bool = False, keep_alive: Optional[str] = None, timeout: int = 60) -> str:
     """
     Generate chat completion using Ollama.
     
@@ -205,6 +255,8 @@ def chat(prompt: str, model: str = None, stream: bool = False) -> str:
         prompt: User prompt
         model: Model name (defaults to config.OLLAMA_CHAT_MODEL)
         stream: Whether to stream the response
+        keep_alive: Optional keep_alive duration (e.g., "10m"). If None, model unloads after use.
+        timeout: Request timeout in seconds (default: 60)
         
     Returns:
         Generated text response
@@ -212,6 +264,13 @@ def chat(prompt: str, model: str = None, stream: bool = False) -> str:
     model = model or config.OLLAMA_CHAT_MODEL
     
     try:
+        # Warm model detection: if model was used <60s ago, extend keep_alive
+        if keep_alive is None and model in _model_last_used:
+            time_since_use = time.time() - _model_last_used[model]
+            if time_since_use < 60:
+                keep_alive = "10m"
+                logger.debug(f"Model {model} was used {time_since_use:.1f}s ago, extending keep_alive to 10m")
+        
         # Ensure model is loaded
         if not is_model_loaded(model):
             success, msg = load_model(model)
@@ -219,15 +278,20 @@ def chat(prompt: str, model: str = None, stream: bool = False) -> str:
                 raise RuntimeError(f"Failed to load model: {msg}")
         
         _last_used[model] = time.time()
+        _model_last_used[model] = time.time()
+        
+        request_json = {
+            "model": model,
+            "prompt": prompt,
+            "stream": stream
+        }
+        if keep_alive:
+            request_json["options"] = {"keep_alive": keep_alive}
         
         response = requests.post(
             f"{config.OLLAMA_API_BASE}/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": stream
-            },
-            timeout=120
+            json=request_json,
+            timeout=timeout
         )
         
         if response.status_code != 200:

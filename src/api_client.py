@@ -282,3 +282,22 @@ def get_files_by_tag(tag: str, page: int = 1, limit: int = 20) -> Dict:
     except Exception as e:
         return {"files": [], "total": 0, "page": page, "limit": limit, "pages": 0, "error": str(e)}
 
+
+def get_ingestion_status(file_path: str) -> Dict:
+    """Get ingestion status for a file."""
+    try:
+        # URL encode the file path
+        import urllib.parse
+        encoded_path = urllib.parse.quote(file_path, safe='')
+        response = requests.get(
+            f"{API_BASE}/ingest/status/{encoded_path}",
+            timeout=5
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result is None:
+            return {"status": "unknown", "chunks_added": 0, "error": None}
+        return result
+    except Exception as e:
+        return {"status": "error", "chunks_added": 0, "error": str(e)}
+

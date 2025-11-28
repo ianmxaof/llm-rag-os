@@ -105,8 +105,17 @@ def convert_pdf_to_markdown(pdf_path: Path) -> Optional[Path]:
         return None
 
 
-def categorize_text(text: str) -> str:
+def categorize_text(text: str, file_path: Optional[Path] = None) -> str:
     """Categorize file content semantically into a folder label."""
+    # Try using semantic categorizer if file path is provided
+    if file_path:
+        try:
+            from backend.utils.semantic_categorizer import categorize_file
+            return categorize_file(file_path)
+        except Exception as e:
+            print(f"[WARN] Semantic categorizer failed: {e}, falling back to LLM/keyword")
+    
+    # Fallback to LLM-based categorization
     if not client:
         # Fallback to keyword-based classification
         return categorize_by_keywords(text)
@@ -158,18 +167,14 @@ def categorize_by_keywords(text: str) -> str:
 
 
 def move_to_category(md_path: Path, category: str) -> Path:
-    """Move converted markdown into the Obsidian vault Auto folder.
-
-    Instead of routing to category-specific folders, this centralizes
-    processed markdown in knowledge/notes/Auto/ so Obsidian and the RAG
-    system share the same processed corpus.
-    """
-    auto_dir = KNOWLEDGE_DIR / "notes" / "Auto"
-    auto_dir.mkdir(parents=True, exist_ok=True)
-    dest = auto_dir / md_path.name
+    """Move converted markdown into archived/Auto/<category>/ folder."""
+    archive_base = KNOWLEDGE_DIR / "archived" / "Auto"
+    category_dir = archive_base / category
+    category_dir.mkdir(parents=True, exist_ok=True)
+    dest = category_dir / md_path.name
     if dest.exists():
         # Add timestamp to avoid conflicts
-        dest = auto_dir / f"{md_path.stem}_{int(time.time())}{md_path.suffix}"
+        dest = category_dir / f"{md_path.stem}_{int(time.time())}{md_path.suffix}"
     shutil.move(str(md_path), str(dest))
     return dest
 
@@ -217,10 +222,10 @@ def process_file(file_path: Path, auto_ingest: bool = True):
 
     # Classify content
     print("  -> Classifying content...")
-    category = categorize_text(text_sample)
+    category = categorize_text(text_sample, md_path)
     print(f"  [CATEGORY] {category}")
 
-    # Move to category folder
+    # Move to category folder (now uses archived/Auto/<category>/)
     categorized_path = move_to_category(md_path, category)
     print(f"  [OK] Moved to: {categorized_path.relative_to(ROOT_DIR)}")
 

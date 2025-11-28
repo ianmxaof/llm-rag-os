@@ -3,6 +3,7 @@ openai
 chromadb
 tiktoken
 langchain
+langchain-text-splitters
 python-dotenv
 requests
 beautifulsoup4
@@ -22,6 +23,6 @@ umap-learn
 pandas
 pydantic
 pyvis==0.3.2
-scikit-learn==1.5.0
+scikit-learn
 backoff
 

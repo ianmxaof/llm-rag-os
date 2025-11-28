@@ -105,6 +105,19 @@ if (-not $backendReady) {
     Write-Host "  ⚠ Backend did not respond in time, but continuing..." -ForegroundColor Yellow
 }
 
+# Notes watcher is now controlled exclusively via Streamlit Settings tab
+# This prevents conflicts between auto-start and manual start
+# Write-Host "  → Starting notes watcher..." -ForegroundColor Cyan
+# try {
+#     $notesWatcherCmd = "cd /d `"$projectRoot`" && python scripts/notes_watcher.py"
+#     Start-Process cmd -ArgumentList "/k", $notesWatcherCmd -WindowStyle Minimized
+#     Write-Host "  ✓ Notes watcher started (minimized window)" -ForegroundColor Green
+# } catch {
+#     Write-Host "  ⚠ Failed to start notes watcher: $_" -ForegroundColor Yellow
+#     Write-Host "     You can start it manually via Streamlit Settings tab" -ForegroundColor Gray
+# }
+Write-Host "  ℹ Notes watcher: Start via Streamlit Settings → Obsidian Sync" -ForegroundColor Gray
+
 # Start Streamlit
 Write-Host "  → Starting Streamlit app on http://127.0.0.1:8501" -ForegroundColor Cyan
 

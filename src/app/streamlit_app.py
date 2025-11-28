@@ -6,7 +6,7 @@ import shutil
 import json
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable, Any
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -14,6 +14,17 @@ import webbrowser
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+# === ERROR HANDLING WRAPPER ===
+def safe_execute(func: Callable, fallback_value: Any, error_message: str) -> Any:
+    """Execute function with error handling"""
+    try:
+        return func()
+    except Exception as e:
+        logger.error(f"{error_message}: {e}")
+        st.error(f"⚠️ {error_message}")
+        return fallback_value
 
 # API base URL for backend requests
 API_BASE = "http://127.0.0.1:8000"
@@ -34,6 +45,12 @@ from scripts.chat_logger import ChatLogger
 from scripts.config import config
 import psutil
 
+# Import v2.0 utilities
+from src.app.utils.rag_engine import get_rag_context, get_rag_context_cached, _compute_context_hash, adjust_chunk_relevance
+from src.app.utils.obsidian_bridge import get_related_notes
+from src.app.utils.memory_store import get_memory_streams, load_conversation_by_id
+from typing import Callable, Any
+
 # Remove Streamlit timeout limits for long-running ingestion tasks
 os.environ.setdefault("STREAMLIT_SERVER_MAX_REQUEST_SIZE", "0")
 os.environ.setdefault("STREAMLIT_SERVER_MAX_MESSAGE_SIZE", "0")
@@ -42,7 +59,7 @@ os.environ.setdefault("STREAMLIT_SERVER_MAX_MESSAGE_SIZE", "0")
 st.set_page_config(
     page_title="Powercore Mind",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # === THIS LINE IS MAGIC — DO NOT DELETE === 
@@ -75,6 +92,44 @@ components.html("""
         url.searchParams.set('canvas', idx);
         window.location.href = url.toString();
     };
+    
+    // Toggle Streamlit's native sidebar
+    window.toggleSidebar = function() {
+        // Streamlit's sidebar toggle is typically the first button in the header
+        // Try multiple selectors to find it
+        const selectors = [
+            'header[data-testid="stHeader"] button:first-child',
+            'button[kind="header"]',
+            'button[aria-label*="sidebar" i]',
+            'button[aria-label*="menu" i]',
+            '[data-testid="stSidebar"] + * button',
+            'header button'
+        ];
+        
+        for (const selector of selectors) {
+            const button = document.querySelector(selector);
+            if (button && button.offsetParent !== null) { // Check if visible
+                button.click();
+                return true;
+            }
+        }
+        return false;
+    };
+    
+    // Sync sidebar state on page load based on session state
+    // This runs after Streamlit renders to ensure sidebar state matches session state
+    function syncSidebarState() {
+        // Check if sidebar should be open based on URL params or other indicators
+        // For now, we'll rely on initial_sidebar_state and manual toggling
+        // The hamburger button will trigger a rerun and this will sync
+    }
+    
+    // Run sync on page load
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', syncSidebarState);
+    } else {
+        syncSidebarState();
+    }
     
     // Keyboard shortcuts
     document.addEventListener('keydown', function(e) {
@@ -322,6 +377,124 @@ st.markdown("""
         justify-content: center;
         padding: 0 !important;
     }
+    
+    /* TRUE 2030 GLASSMORPHISM — NOTHING CAN STOP THIS */
+    div[data-testid="stExpander"] {
+        background: rgba(26, 26, 26, 0.85) !important;
+        backdrop-filter: blur(16px) !important;
+        -webkit-backdrop-filter: blur(16px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.12) !important;
+        border-radius: 16px !important;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4) !important;
+        margin: 12px 0 !important;
+        padding: 8px !important;
+    }
+    
+    /* Expander content area */
+    div[data-testid="stExpander"] > div {
+        background: transparent !important;
+    }
+    
+    /* Expander label */
+    div[data-testid="stExpander"] > div > label {
+        color: #ffffff !important;
+        font-weight: 600 !important;
+        font-size: 15px !important;
+    }
+    
+    /* Sidebar background gradient */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0a0a0a 0%, #111 100%) !important;
+    }
+    
+    /* Sidebar content area */
+    section[data-testid="stSidebar"] > div {
+        background: transparent !important;
+    }
+    
+    /* Relevance badge styles */
+    .relevance-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-left: 8px;
+    }
+    
+    .relevance-high {
+        background: rgba(0, 255, 136, 0.2);
+        color: #00ff88;
+    }
+    
+    .relevance-medium {
+        background: rgba(255, 184, 0, 0.2);
+        color: #ffb800;
+    }
+    
+    .relevance-low {
+        background: rgba(255, 68, 68, 0.2);
+        color: #ff4444;
+    }
+    
+    /* Note link styles */
+    .note-link {
+        color: #7c3aed !important;
+        text-decoration: none;
+        border-bottom: 1px dashed rgba(124, 58, 237, 0.5);
+        padding: 2px 4px;
+        border-radius: 4px;
+        display: inline-block;
+        margin: 2px;
+        font-size: 0.9rem;
+    }
+    
+    .note-link:hover {
+        background: rgba(124, 58, 237, 0.1);
+        border-bottom: 1px solid #7c3aed;
+    }
+    
+    /* RAG chunk styles */
+    .rag-chunk {
+        background: rgba(30, 30, 30, 0.8);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 8px;
+        padding: 10px;
+        margin: 8px 0;
+    }
+    
+    .rag-chunk:hover {
+        border-color: rgba(124, 58, 237, 0.3);
+        transform: translateX(2px);
+    }
+    
+    /* Memory item styles */
+    .memory-item {
+        padding: 8px 12px;
+        border-radius: 8px;
+        margin: 4px 0;
+        cursor: pointer;
+        background: rgba(30, 30, 30, 0.4);
+    }
+    
+    .memory-item:hover {
+        background: rgba(124, 58, 237, 0.1);
+        border-left: 2px solid #7c3aed;
+        padding-left: 10px;
+    }
+    
+    .memory-item.today {
+        border-left: 2px solid #00ff88;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Smooth sidebar animation
+st.markdown("""
+<style>
+div[data-testid='stSidebar'] {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -333,7 +506,7 @@ if "session_id" not in st.session_state:
 if "conversation_id" not in st.session_state:
     st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
 if "sidebar_open" not in st.session_state:
-    st.session_state.sidebar_open = False
+    st.session_state.sidebar_open = True   # ← This single line reveals v2.0 forever
 if "current_page" not in st.session_state:
     st.session_state.current_page = "chat"
 if "project_tag" not in st.session_state:
@@ -348,6 +521,25 @@ if "top_k" not in st.session_state:
     st.session_state.top_k = rag_utils.DEFAULT_K
 if "show_context" not in st.session_state:
     st.session_state.show_context = False
+
+# Initialize v2.0 state variables
+if "related_notes" not in st.session_state:
+    st.session_state.related_notes = []
+if "current_thread" not in st.session_state:
+    st.session_state.current_thread = None
+if "memory_streams" not in st.session_state:
+    st.session_state.memory_streams = []
+if "rag_context" not in st.session_state:
+    st.session_state.rag_context = []
+if "settings" not in st.session_state:
+    st.session_state.settings = {
+        'top_k': st.session_state.get('top_k', 3),
+        'relevance_threshold': st.session_state.get('rag_threshold', 0.25),
+        'auto_crystallize': False,
+        'uncensored_mode': st.session_state.get('raw_mode', False),
+        'auto_ingest_obsidian': st.session_state.get('auto_ingest_obsidian', True),
+        'manual_rag_tuning': False
+    }
 
 # Initialize ChatLogger
 if "chat_logger" not in st.session_state:
@@ -385,6 +577,78 @@ def get_ollama_status_safe():
     except Exception as e:
         return {"available": False, "error": str(e)[:100]}
 
+
+# === ATOMIC STATE UPDATE FUNCTION ===
+def update_conversation_state(new_message: Optional[Dict] = None):
+    """Atomic state update after message - prevents race conditions"""
+    # Store message if provided
+    if new_message:
+        st.session_state.chat_history.append(new_message)
+    
+    # Batch compute related data ONCE
+    if st.session_state.chat_history:
+        context = " ".join([
+            m.get('question', m.get('content', '')) 
+            for m in st.session_state.chat_history[-3:]
+        ])
+        
+        # Update all state together atomically
+        st.session_state.update({
+            'related_notes': safe_execute(
+                lambda: get_related_notes(context, top_k=5),
+                fallback_value=[],
+                error_message="Could not update related notes"
+            ),
+            'current_thread': {
+                'id': st.session_state.conversation_id,
+                'title': (
+                    st.session_state.chat_history[0].get('question', 'New Thread')[:50]
+                    if st.session_state.chat_history
+                    else 'New Thread'
+                ),
+                'message_count': len(st.session_state.chat_history)
+            },
+            'rag_context': safe_execute(
+                lambda: get_rag_context(
+                    st.session_state.chat_history[-1].get('question', ''),
+                    k=st.session_state.settings.get('top_k', 8),
+                    settings=st.session_state.settings
+                ) if st.session_state.chat_history else [],
+                fallback_value=[],
+                error_message="Could not update RAG context"
+            )
+        })
+        
+        # Update memory streams (less frequently - every 5 messages)
+        if len(st.session_state.chat_history) % 5 == 0:
+            st.session_state.memory_streams = safe_execute(
+                lambda: get_memory_streams(),
+                fallback_value=[],
+                error_message="Could not update memory streams"
+            )
+
+
+# === LOAD CONVERSATION FUNCTION ===
+def load_conversation(conversation_id: str):
+    """Restore a previous conversation from memory store"""
+    try:
+        conversation = load_conversation_by_id(conversation_id)
+        if conversation:
+            st.session_state.conversation_id = conversation_id
+            st.session_state.chat_history = conversation.get('messages', [])
+            st.session_state.current_thread = {
+                'id': conversation_id,
+                'title': conversation.get('title', 'Restored Thread'),
+                'message_count': len(conversation.get('messages', []))
+            }
+            update_conversation_state(None)
+            st.success(f"✅ Loaded: {conversation.get('title', 'Conversation')}")
+            st.rerun()
+        else:
+            st.error("Conversation not found")
+    except Exception as e:
+        st.error(f"Failed to load conversation: {e}")
+
 # Phase 1 & 6: Fixed Header Bar
 def render_header():
     """Render fixed top header bar with logo, controls, and menu."""
@@ -393,9 +657,25 @@ def render_header():
     
     with col1:
         # Custom beautiful hamburger button
-        if st.button("☰", key="hamburger", use_container_width=True):
-            # This is the ONLY correct way in modern Streamlit
-            st.session_state.sidebar_open = not st.session_state.get("sidebar_open", False)
+        hamburger_clicked = st.button("☰", key="hamburger", use_container_width=True)
+        if hamburger_clicked:
+            # Toggle session state
+            current_state = st.session_state.get("sidebar_open", True)
+            st.session_state.sidebar_open = not current_state
+            # Use JavaScript to click Streamlit's native sidebar toggle button
+            # The JavaScript will run after the rerun completes
+            components.html(f"""
+            <script>
+            (function() {{
+                // Wait for Streamlit to finish rendering, then toggle sidebar
+                setTimeout(function() {{
+                    if (window.toggleSidebar) {{
+                        window.toggleSidebar();
+                    }}
+                }}, 300);
+            }})();
+            </script>
+            """, height=0, width=0, key="sidebar_toggle_js")
             st.rerun()
     
     with col2:
@@ -436,9 +716,9 @@ def render_header():
 # Phase 1: Collapsible Sidebar
 def render_sidebar():
     """Render collapsible sidebar with navigation links."""
-    # Conditionally render sidebar based on state
-    if st.session_state.get("sidebar_open", False):
-        with st.sidebar:
+    # Always render sidebar (for Streamlit's native system), but conditionally show content
+    with st.sidebar:
+        if st.session_state.get("sidebar_open", False):
             st.markdown("## Navigation")
             
             # Close button
@@ -453,102 +733,323 @@ def render_sidebar():
                 st.rerun()
             
             st.markdown("---")
-        
-        pages = {
-            "Chat": "chat",
-            "Library": "library",
-            "Ingest": "ingest",
-            "Visualize": "visualize",
-            "Graph": "graph",
-            "Settings": "settings",
-            "Prompts": "prompts"
-        }
-        
-        for page_name, page_key in pages.items():
-            if st.button(page_name, key=f"nav_{page_key}", use_container_width=True):
-                st.session_state.current_page = page_key
-                st.rerun()
-        
-        st.markdown("---")
-        
-        # Session Context
-        st.header("Session Context")
-        current_focus = st.selectbox(
-            "Current Focus",
-            ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"],
-            index=["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"].index(
-                st.session_state.current_focus
-            ) if st.session_state.current_focus in ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"] else 0,
-            help="What are you working on right now?"
-        )
-        st.session_state.current_focus = current_focus
-        
-        st.markdown("---")
-        st.header("Settings")
-        top_k = st.slider("Top-K context chunks", min_value=1, max_value=10, value=st.session_state.top_k)
-        st.session_state.top_k = top_k
-        show_context = st.checkbox("Show retrieved context", value=st.session_state.show_context)
-        st.session_state.show_context = show_context
-        
-        st.markdown("---")
-        st.subheader("Obsidian Sync")
-        
-        auto_ingest_obsidian = st.checkbox(
-            "Auto-ingest Obsidian notes",
-            value=st.session_state.get("auto_ingest_obsidian", True),
-            help="Automatically ingest new/modified notes from knowledge/notes/ folder"
-        )
-        st.session_state.auto_ingest_obsidian = auto_ingest_obsidian
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            try:
-                watcher_status_response = requests.get(f"{API_BASE}/ingest/watch/status", timeout=2)
-                if watcher_status_response.status_code == 200:
-                    watcher_status = watcher_status_response.json().get("notes_watcher", "unknown")
-                    if watcher_status == "running":
-                        st.success("✅ Running")
-                    else:
-                        st.warning(f"⚠️ {watcher_status}")
+            
+            pages = {
+                "Chat": "chat",
+                "Library": "library",
+                "Ingest": "ingest",
+                "Visualize": "visualize",
+                "Graph": "graph",
+                "Settings": "settings",
+                "Prompts": "prompts"
+            }
+            
+            for page_name, page_key in pages.items():
+                if st.button(page_name, key=f"nav_{page_key}", use_container_width=True):
+                    st.session_state.current_page = page_key
+                    st.rerun()
+            
+            st.markdown("---")
+            
+            # === V2.0 NEW EXPANDERS ===
+            
+            # 1. Active Context Expander
+            with st.expander("🎯 Active Context", expanded=True):
+                if st.session_state.current_thread:
+                    st.markdown(f"""
+                    <div style="background: rgba(124, 58, 237, 0.15); border-left: 3px solid #7c3aed; padding: 12px; border-radius: 8px; margin-bottom: 12px;">
+                        <strong>{st.session_state.current_thread.get('title', 'Untitled Thread')}</strong><br>
+                        <small style="color: rgba(255,255,255,0.5);">
+                            {st.session_state.current_thread.get('message_count', 0)} messages
+                        </small>
+                    </div>
+                    """, unsafe_allow_html=True)
                 else:
-                    st.info("Unknown")
-            except Exception:
-                st.info("Unknown")
-        
-        with col2:
-            col_start, col_stop = st.columns(2)
-            with col_start:
-                if st.button("▶", key="start_notes_watcher"):
-                    try:
-                        response = requests.post(f"{API_BASE}/ingest/watch/notes/start", timeout=5)
-                        if response.status_code == 200:
-                            st.success("Started")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-            with col_stop:
-                if st.button("⏹", key="stop_notes_watcher"):
-                    try:
-                        response = requests.post(f"{API_BASE}/ingest/watch/notes/stop", timeout=5)
-                        if response.status_code == 200:
-                            st.success("Stopped")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-        
-        st.markdown("---")
-        if st.button("Ingest all existing Obsidian notes (one-time)", type="primary", key="ingest_all_obsidian"):
-            with st.spinner("Ingesting your entire vault..."):
-                try:
-                    response = requests.post(f"{API_BASE}/ingest/watch/notes/ingest-all", timeout=300)
-                    if response.status_code == 200:
-                        result = response.json()
-                        count = result.get("count", 0)
-                        st.success(f"Done! {count} notes added.")
+                    st.caption("No active thread. Start a new thought!")
+                
+                # Related Obsidian notes
+                related = safe_execute(
+                    lambda: get_related_notes(
+                        " ".join([
+                            m.get('question', m.get('content', '')) 
+                            for m in st.session_state.chat_history[-3:]
+                        ])
+                        if st.session_state.chat_history else "",
+                        top_k=5
+                    ),
+                    fallback_value=[],
+                    error_message="Could not load related notes"
+                )
+                
+                if related:
+                    st.caption("🔗 Connected Notes")
+                    for note in related[:3]:
+                        score_class = "relevance-high" if note['score'] >= 0.7 else ("relevance-medium" if note['score'] >= 0.4 else "relevance-low")
+                        st.markdown(f"""
+                        <a href="#" class="note-link" onclick="return false;">
+                            {note['title']} <span class="relevance-badge {score_class}">
+                                {note['score']:.0%}
+                            </span>
+                        </a>
+                        """, unsafe_allow_html=True)
+                        if st.button(f"Inject Context", key=f"inject_{note['id']}", use_container_width=True):
+                            st.info(f"Injecting context from: {note['title']}")
+            
+            # 2. Knowledge Base Expander
+            with st.expander("📚 Knowledge Base", expanded=False):
+                tab1, tab2, tab3 = st.tabs(["Vault", "Documents", "Graph"])
+                
+                with tab1:
+                    st.caption("Obsidian Vault Browser")
+                    vault_path = Path("./knowledge/notes")
+                    if vault_path.exists():
+                        folders = safe_execute(
+                            lambda: [d.name for d in vault_path.iterdir() if d.is_dir() and not d.name.startswith('.')],
+                            fallback_value=[],
+                            error_message="Could not list vault folders"
+                        )
+                        for folder in folders[:5]:
+                            if st.checkbox(f"📁 {folder}", value=False):
+                                st.markdown(f"- 📄 {folder} notes")
+                    else:
+                        st.caption("Vault not found")
+                
+                with tab2:
+                    st.caption("Ingested Documents")
+                    docs_result = safe_execute(
+                        lambda: list_documents(),
+                        fallback_value={"items": [], "total": 0},
+                        error_message="Could not load documents"
+                    )
+                    # Handle both dict response and list response
+                    if isinstance(docs_result, dict):
+                        docs_list = docs_result.get("items", [])
+                    elif isinstance(docs_result, list):
+                        docs_list = docs_result
+                    else:
+                        docs_list = []
+                    
+                    if docs_list:
+                        st.markdown("**Recent:**")
+                        for doc in docs_list[:5]:
+                            # Handle both dict and string formats
+                            if isinstance(doc, dict):
+                                doc_name = doc.get('source_path', doc.get('name', 'Unknown'))
+                            else:
+                                doc_name = str(doc)
+                            st.markdown(f"- {doc_name}")
+                    else:
+                        st.caption("No documents ingested yet")
+                    
+                    if st.button("➕ Ingest New Document", use_container_width=True):
+                        st.info("Use the paperclip icon in the chat input to ingest files")
+                
+                with tab3:
+                    st.markdown("""
+                    <div style="background: rgba(15, 15, 15, 0.8); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 12px; margin: 8px 0; min-height: 120px; display: flex; align-items: center; justify-content: center; color: rgba(255, 255, 255, 0.4); font-size: 0.85rem;">
+                        🌐 Graph View<br>
+                        <small>Click to expand full graph</small>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            # 3. Memory Streams Expander
+            with st.expander("💭 Memory Streams", expanded=False):
+                streams = safe_execute(
+                    lambda: get_memory_streams(),
+                    fallback_value=[],
+                    error_message="Could not load memory streams"
+                )
+                
+                # Group by category
+                today = [s for s in streams if s.get('category') == 'today']
+                week = [s for s in streams if s.get('category') == 'week']
+                
+                if today:
+                    st.caption("Today")
+                    for stream in today:
+                        st.markdown(f"""
+                        <div style="padding: 8px 12px; border-radius: 8px; margin: 4px 0; cursor: pointer; background: rgba(30, 30, 30, 0.4); border-left: 2px solid #00ff88;">
+                            <strong>{stream['title']}</strong><br>
+                            <small style="color: rgba(255,255,255,0.5);">
+                                {stream.get('message_count', 0)} messages
+                            </small>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        if st.button("Load", key=f"load_{stream['id']}", use_container_width=True):
+                            load_conversation(stream['id'])
+                
+                if week:
+                    st.caption("This Week")
+                    for stream in week:
+                        st.markdown(f"""
+                        <div style="padding: 8px 12px; border-radius: 8px; margin: 4px 0; cursor: pointer; background: rgba(30, 30, 30, 0.4);">
+                            <strong>{stream['title']}</strong><br>
+                            <small style="color: rgba(255,255,255,0.5);">
+                                {stream.get('message_count', 0)} messages
+                            </small>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        if st.button("Load", key=f"load_{stream['id']}", use_container_width=True):
+                            load_conversation(stream['id'])
+            
+            # 4. System Settings Expander (enhanced)
+            with st.expander("⚙️ System", expanded=False):
+                st.caption("Interaction Preferences")
+                
+                auto_crystallize = st.toggle(
+                    "Auto-Crystallize Insights",
+                    value=st.session_state.settings.get('auto_crystallize', False),
+                    key="auto_crystallize_toggle",
+                    help="Automatically save valuable insights to Obsidian"
+                )
+                st.session_state.settings['auto_crystallize'] = auto_crystallize
+                
+                uncensored_mode = st.toggle(
+                    "Uncensored Raw Mode",
+                    value=st.session_state.settings.get('uncensored_mode', False),
+                    key="uncensored_mode_toggle",
+                    help="Disable content filters (use responsibly)"
+                )
+                st.session_state.settings['uncensored_mode'] = uncensored_mode
+                st.session_state.raw_mode = uncensored_mode
+                
+                # Advanced RAG tuning
+                st.markdown("---")
+                manual_tuning = st.checkbox(
+                    "Manual RAG Tuning",
+                    value=st.session_state.settings.get('manual_rag_tuning', False),
+                    help="Override automatic RAG parameter optimization"
+                )
+                st.session_state.settings['manual_rag_tuning'] = manual_tuning
+                
+                if manual_tuning:
+                    st.caption("⚠️ System auto-tunes these. Override only if needed.")
+                    top_k_slider = st.slider(
+                        "Context Chunks (Top-K)",
+                        min_value=1,
+                        max_value=20,
+                        value=st.session_state.settings.get('top_k', 8),
+                        key="top_k_slider",
+                        help="Number of context chunks to retrieve"
+                    )
+                    st.session_state.settings['top_k'] = top_k_slider
+                    st.session_state.top_k = top_k_slider
+                    
+                    relevance_slider = st.slider(
+                        "Relevance Threshold",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=st.session_state.settings.get('relevance_threshold', 0.25),
+                        step=0.05,
+                        key="relevance_slider",
+                        help="Minimum similarity score for retrieval"
+                    )
+                    st.session_state.settings['relevance_threshold'] = relevance_slider
+                    st.session_state.rag_threshold = relevance_slider
+            
+            # 5. Prompts Library Expander
+            with st.expander("📝 Prompts Library", expanded=False):
+                st.caption("Quick Templates")
+                # TODO: Query prompts from API if available
+                prompts = [
+                    "Analyze and synthesize...",
+                    "Extract key insights from...",
+                    "Compare and contrast...",
+                    "Crystallize this conversation"
+                ]
+                
+                for prompt in prompts:
+                    if st.button(prompt, key=f"prompt_{prompt[:10]}", use_container_width=True):
+                        st.session_state.prompt_template = prompt
                         st.rerun()
-                except Exception as e:
-                    st.error(f"Error: {e}")
-
+            
+            # 6. Session Context & Obsidian Sync (integrated into System Settings)
+            with st.expander("🔧 Session & Sync", expanded=False):
+                # Session Context
+                st.caption("Current Focus")
+                current_focus = st.selectbox(
+                    "What are you working on?",
+                    ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"],
+                    index=["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"].index(
+                        st.session_state.current_focus
+                    ) if st.session_state.current_focus in ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"] else 0,
+                    key="sidebar_current_focus",
+                    help="What are you working on right now?"
+                )
+                st.session_state.current_focus = current_focus
+                
+                st.markdown("---")
+                
+                # Basic Settings
+                st.caption("Display Preferences")
+                show_context = st.checkbox("Show retrieved context", value=st.session_state.show_context, key="sidebar_show_context")
+                st.session_state.show_context = show_context
+                
+                st.markdown("---")
+                
+                # Obsidian Sync
+                st.caption("Obsidian Integration")
+                auto_ingest_obsidian = st.checkbox(
+                    "Auto-ingest Obsidian notes",
+                    value=st.session_state.get("auto_ingest_obsidian", True),
+                    key="sidebar_auto_ingest",
+                    help="Automatically ingest new/modified notes from knowledge/notes/ folder"
+                )
+                st.session_state.auto_ingest_obsidian = auto_ingest_obsidian
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    try:
+                        watcher_status_response = requests.get(f"{API_BASE}/ingest/watch/status", timeout=2)
+                        if watcher_status_response.status_code == 200:
+                            watcher_status = watcher_status_response.json().get("notes_watcher", "unknown")
+                            if watcher_status == "running":
+                                st.success("✅ Running")
+                            else:
+                                st.warning(f"⚠️ {watcher_status}")
+                        else:
+                            st.info("Unknown")
+                    except Exception:
+                        st.info("Unknown")
+                
+                with col2:
+                    col_start, col_stop = st.columns(2)
+                    with col_start:
+                        if st.button("▶", key="sidebar_start_watcher"):
+                            try:
+                                response = requests.post(f"{API_BASE}/ingest/watch/notes/start", timeout=5)
+                                if response.status_code == 200:
+                                    st.success("Started")
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                    with col_stop:
+                        if st.button("⏹", key="sidebar_stop_watcher"):
+                            try:
+                                response = requests.post(f"{API_BASE}/ingest/watch/notes/stop", timeout=5)
+                                if response.status_code == 200:
+                                    st.success("Stopped")
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                
+                st.markdown("---")
+                if st.button("Ingest all existing Obsidian notes (one-time)", type="primary", key="sidebar_ingest_all"):
+                    with st.spinner("Ingesting your entire vault..."):
+                        try:
+                            response = requests.post(f"{API_BASE}/ingest/watch/notes/ingest-all", timeout=300)
+                            if response.status_code == 200:
+                                result = response.json()
+                                count = result.get("count", 0)
+                                st.success(f"Done! {count} notes added.")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+        else:
+            # Sidebar is closed - show minimal content or nothing
+            st.markdown("")
+            st.caption("Click ☰ to open sidebar")
+        
 # Issue 3: Render floating action icons for messages
 def render_message_actions(message_id: str, entry: dict, idx: int):
     """Render 3 floating action icons (Copy, Crystallize, Canvas) in bottom-right."""
@@ -643,6 +1144,96 @@ def render_thinking_animation():
     </div>
     """
 
+# === RAG TRANSPARENCY COMPONENT ===
+def render_rag_transparency():
+    """Show RAG context being used with feedback mechanism"""
+    if not st.session_state.show_context:
+        return
+    
+    if not st.session_state.chat_history:
+        return
+    
+    last_entry = st.session_state.chat_history[-1]
+    query = last_entry.get('question', '')
+    sources = last_entry.get('sources', [])
+    
+    if not query or not sources:
+        return
+    
+    # Use cached RAG context retrieval
+    try:
+        context_hash = _compute_context_hash(st.session_state.chat_history, st.session_state.settings)
+        chunks = safe_execute(
+            lambda: get_rag_context_cached(
+                context_hash, 
+                query, 
+                st.session_state.settings.get('top_k', 8),
+                st.session_state.settings
+            ),
+            fallback_value=[],
+            error_message="Could not load RAG context"
+        )
+    except Exception as e:
+        logger.error(f"Error in render_rag_transparency: {e}")
+        chunks = []
+    
+    # If no chunks from cache, use sources from last entry
+    if not chunks and sources:
+        chunks = []
+        for idx, source in enumerate(sources[:5]):
+            chunks.append({
+                'id': f"chunk_{idx}",
+                'source': source.get('source', 'unknown') if isinstance(source, dict) else str(source),
+                'score': source.get('score', 0.5) if isinstance(source, dict) else 0.5,
+                'preview': source.get('preview', '') if isinstance(source, dict) else '',
+                'content': source.get('content', '') if isinstance(source, dict) else ''
+            })
+    
+    if not chunks:
+        return
+    
+    with st.expander(f"🧬 Active Context ({len(chunks)} chunks)", expanded=False):
+        st.caption("The system is using these knowledge fragments:")
+        
+        for chunk in chunks:
+            score = chunk.get('score', 0.5)
+            score_class = "relevance-high" if score >= 0.7 else ("relevance-medium" if score >= 0.4 else "relevance-low")
+            
+            st.markdown(f"""
+            <div class="rag-chunk">
+                <div>
+                    <strong>{chunk.get('source', 'unknown')}</strong>
+                    <span class="relevance-badge {score_class}">
+                        {score:.0%}
+                    </span>
+                </div>
+                <p style="color: rgba(255,255,255,0.7); font-size: 0.9rem; margin-top: 8px;">
+                    {chunk.get('preview', chunk.get('content', '')[:150])}
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Feedback buttons
+            col1, col2, col3 = st.columns([1, 1, 4])
+            with col1:
+                if st.button("↑ Boost", key=f"boost_{chunk['id']}", help="Increase relevance"):
+                    if adjust_chunk_relevance(
+                        chunk['id'], 
+                        chunk.get('source', ''),
+                        +0.1,
+                        st.session_state.conversation_id
+                    ):
+                        st.success("✓")
+            with col2:
+                if st.button("↓ Lower", key=f"lower_{chunk['id']}", help="Decrease relevance"):
+                    if adjust_chunk_relevance(
+                        chunk['id'], 
+                        chunk.get('source', ''),
+                        -0.1,
+                        st.session_state.conversation_id
+                    ):
+                        st.info("✓")
+
 # Render header
 render_header()
 
@@ -655,6 +1246,13 @@ if st.session_state.current_page == "chat":
     
     # Chat container
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+    
+    # RAG Transparency Component (Phase 3)
+    safe_execute(
+        lambda: render_rag_transparency(),
+        fallback_value=None,
+        error_message="Could not render RAG transparency"
+    )
     
     # Mode controls (moved from old chat tab)
     col1, col2 = st.columns([1, 3])
@@ -832,8 +1430,8 @@ if st.session_state.current_page == "chat":
                 result = ingest_file(str(save_path.resolve()))
                 if result.get("success"):
                     st.toast(f"Ingesting {uploaded.name}… added to your brain", icon="✅")
-                    # Add system message
-                    st.session_state.chat_history.append({
+                    # Add system message using atomic state update
+                    system_message = {
                         "question": f"Attached: {uploaded.name}",
                         "answer": f"File ingested and available for retrieval.",
                         "sources": [],
@@ -845,7 +1443,8 @@ if st.session_state.current_page == "chat":
                         "conversation_id": st.session_state.conversation_id,
                         "user_log_id": None,
                         "ai_log_id": None
-                    })
+                    }
+                    update_conversation_state(system_message)
                     st.session_state.show_file_uploader = False
                     st.rerun()
             except Exception as e:
@@ -900,7 +1499,7 @@ if st.session_state.current_page == "chat":
                     )
                 except Exception as e:
                     logger.warning(f"Failed to log user message: {e}")
-                
+            
                 try:
                     ai_log_id = st.session_state.chat_logger.log_message(
                         session_id=st.session_state.session_id,
@@ -916,7 +1515,7 @@ if st.session_state.current_page == "chat":
                     logger.warning(f"Failed to log AI message: {e}")
             
             # Store in chat history
-            st.session_state.chat_history.append({
+            new_message_entry = {
                 "question": question,
                 "answer": answer,
                 "sources": sources,
@@ -928,8 +1527,10 @@ if st.session_state.current_page == "chat":
                 "conversation_id": st.session_state.conversation_id,
                 "user_log_id": user_log_id,
                 "ai_log_id": ai_log_id
-            })
+            }
             
+            # Use atomic state update (Phase 5)
+            update_conversation_state(new_message_entry)
             st.rerun()
             
         except Exception as e:
@@ -992,7 +1593,7 @@ if st.session_state.current_page == "chat":
         if st.session_state.show_context and entry.get("context"):
             with st.expander("Retrieved context"):
                 st.text(entry["context"])
-        
+            
         # Phase 1: Context pill
         if entry.get("sources"):
             num_chunks = len(entry.get("sources", []))

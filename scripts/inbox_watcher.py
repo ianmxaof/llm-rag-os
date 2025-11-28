@@ -57,13 +57,63 @@ class InboxHandler(FileSystemEventHandler):
                 if result.get("success"):
                     logger.info(f"Successfully ingested: {path}")
                     
-                    # Move file to processed directory
+                    # Get suggested category from response
+                    suggested_category = result.get("suggested_category", "uncategorized")
+                    
+                    # Wait for ingestion to complete and get final category
+                    file_path_obj = Path(path)
+                    max_wait = 300  # 5 minutes max
+                    wait_time = 0
+                    final_category = suggested_category
+                    
+                    while wait_time < max_wait:
+                        time.sleep(2)
+                        try:
+                            status_response = requests.get(
+                                f"{self.api_base}/ingest/status/{file_path_obj.resolve()}",
+                                timeout=10
+                            )
+                            if status_response.status_code == 200:
+                                status_data = status_response.json()
+                                status = status_data.get("status")
+                                if status == "completed":
+                                    final_category = status_data.get("category") or suggested_category
+                                    break
+                                elif status == "failed":
+                                    logger.error(f"Ingestion failed: {status_data.get('error')}")
+                                    break
+                        except Exception:
+                            pass
+                        wait_time += 2
+                    
+                    # Copy to Obsidian notes folder (bidirectional sync)
                     try:
-                        processed_dir = config.PROCESSED
-                        processed_dir.mkdir(parents=True, exist_ok=True)
+                        notes_dir = config.ROOT / "knowledge" / "notes" / "Inbox from RAG"
+                        notes_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        obsidian_target = notes_dir / file_path_obj.name
+                        
+                        # Handle duplicate filenames
+                        counter = 1
+                        while obsidian_target.exists():
+                            name_parts = file_path_obj.stem, file_path_obj.suffix
+                            new_filename = f"{name_parts[0]}_{counter}{name_parts[1]}"
+                            obsidian_target = notes_dir / new_filename
+                            counter += 1
+                        
+                        shutil.copy2(path, str(obsidian_target))
+                        logger.info(f"Copied to Obsidian: {obsidian_target.relative_to(config.ROOT)}")
+                    except Exception as e:
+                        logger.error(f"Failed to copy file to Obsidian: {e}")
+                    
+                    # Move file to archived/Auto/<category>/ directory
+                    try:
+                        archive_base = config.ARCHIVE / "Auto"
+                        category_dir = archive_base / final_category
+                        category_dir.mkdir(parents=True, exist_ok=True)
                         
                         filename = os.path.basename(path)
-                        target = processed_dir / filename
+                        target = category_dir / filename
                         
                         # Handle duplicate filenames
                         counter = 1
@@ -73,13 +123,13 @@ class InboxHandler(FileSystemEventHandler):
                                 new_filename = f"{name_parts[0]}_{counter}.{name_parts[1]}"
                             else:
                                 new_filename = f"{filename}_{counter}"
-                            target = processed_dir / new_filename
+                            target = category_dir / new_filename
                             counter += 1
                         
                         shutil.move(path, str(target))
-                        logger.info(f"Moved to processed: {target}")
+                        logger.info(f"Moved to archive: {target.relative_to(config.ROOT)}")
                     except Exception as e:
-                        logger.error(f"Failed to move file to processed: {e}")
+                        logger.error(f"Failed to move file to archive: {e}")
                 else:
                     logger.error(f"Ingestion failed: {result.get('message', 'Unknown error')}")
                     # Move failed file to error directory
