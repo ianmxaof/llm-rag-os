@@ -46,9 +46,9 @@ from scripts.config import config
 import psutil
 
 # Import v2.0 utilities
-from src.app.utils.rag_engine import get_rag_context, get_rag_context_cached, _compute_context_hash, adjust_chunk_relevance
-from src.app.utils.obsidian_bridge import get_related_notes
-from src.app.utils.memory_store import get_memory_streams, load_conversation_by_id
+from src.app.utils.rag_engine import get_rag_context, get_rag_context_cached, _compute_context_hash, adjust_chunk_relevance, get_performance_stats
+from src.app.utils.obsidian_bridge import get_related_notes, inject_note_context, crystallize_to_vault, open_in_obsidian, detect_vault_changes
+from src.app.utils.memory_store import get_memory_streams, load_conversation_by_id, store_conversation, mark_crystallized, search_conversations
 from typing import Callable, Any
 
 # Remove Streamlit timeout limits for long-running ingestion tasks
@@ -93,28 +93,43 @@ components.html("""
         window.location.href = url.toString();
     };
     
-    // Toggle Streamlit's native sidebar
+    // Toggle Streamlit's native sidebar - BULLETPROOF VERSION
     window.toggleSidebar = function() {
-        // Streamlit's sidebar toggle is typically the first button in the header
-        // Try multiple selectors to find it
-        const selectors = [
-            'header[data-testid="stHeader"] button:first-child',
-            'button[kind="header"]',
-            'button[aria-label*="sidebar" i]',
-            'button[aria-label*="menu" i]',
-            '[data-testid="stSidebar"] + * button',
-            'header button'
-        ];
-        
-        for (const selector of selectors) {
-            const button = document.querySelector(selector);
-            if (button && button.offsetParent !== null) { // Check if visible
-                button.click();
+        // Use Streamlit's official collapsedControl selector
+        const toggleBtn = document.querySelector('[data-testid="collapsedControl"]');
+        if (toggleBtn) {
+            toggleBtn.click();
+            return true;
+        }
+        // Fallback to header button if collapsedControl not found
+        const header = document.querySelector('header[data-testid="stHeader"]');
+        if (header) {
+            const toggleButton = header.querySelector('button');
+            if (toggleButton) {
+                toggleButton.click();
                 return true;
             }
         }
         return false;
     };
+    
+    // Set up hamburger button event listener on page load
+    document.addEventListener('DOMContentLoaded', () => {
+        // Find the custom hamburger button by its key attribute or parent
+        const hamburgerButtons = document.querySelectorAll('button[data-testid*="hamburger"]');
+        hamburgerButtons.forEach(btn => {
+            // Remove any existing listeners to avoid duplicates
+            const newBtn = btn.cloneNode(true);
+            btn.parentNode.replaceChild(newBtn, btn);
+            // Add click listener
+            newBtn.addEventListener('click', (e) => {
+                // Small delay to ensure Streamlit has processed the click
+                setTimeout(() => {
+                    window.toggleSidebar();
+                }, 100);
+            });
+        });
+    });
     
     // Sync sidebar state on page load based on session state
     // This runs after Streamlit renders to ensure sidebar state matches session state
@@ -626,6 +641,21 @@ def update_conversation_state(new_message: Optional[Dict] = None):
                 fallback_value=[],
                 error_message="Could not update memory streams"
             )
+        
+        # Store conversation to persistent memory store
+        safe_execute(
+            lambda: store_conversation(
+                conversation_id=st.session_state.conversation_id,
+                messages=st.session_state.chat_history,
+                title=st.session_state.current_thread.get('title'),
+                tags=st.session_state.get('current_tags', []),
+                metadata={
+                    'related_notes': [n['source'] for n in st.session_state.get('related_notes', [])]
+                }
+            ),
+            fallback_value=False,
+            error_message="Could not store conversation"
+        )
 
 
 # === LOAD CONVERSATION FUNCTION ===
@@ -657,25 +687,30 @@ def render_header():
     
     with col1:
         # Custom beautiful hamburger button
-        hamburger_clicked = st.button("☰", key="hamburger", use_container_width=True)
+        hamburger_clicked = st.button("☰", key="hamburger", use_container_width=True, help="Toggle sidebar")
         if hamburger_clicked:
             # Toggle session state
             current_state = st.session_state.get("sidebar_open", True)
             st.session_state.sidebar_open = not current_state
             # Use JavaScript to click Streamlit's native sidebar toggle button
             # The JavaScript will run after the rerun completes
-            components.html(f"""
+            # NOTE: Removed key= parameter - deprecated in Streamlit ≥1.38
+            components.html("""
             <script>
-            (function() {{
+            (function() {
                 // Wait for Streamlit to finish rendering, then toggle sidebar
-                setTimeout(function() {{
-                    if (window.toggleSidebar) {{
+                setTimeout(function() {
+                    if (window.toggleSidebar) {
                         window.toggleSidebar();
-                    }}
-                }}, 300);
-            }})();
+                    } else {
+                        // Fallback: direct toggle
+                        const toggleBtn = document.querySelector('[data-testid="collapsedControl"]');
+                        if (toggleBtn) toggleBtn.click();
+                    }
+                }, 100);
+            })();
             </script>
-            """, height=0, width=0, key="sidebar_toggle_js")
+            """, height=0, width=0)
             st.rerun()
     
     with col2:
@@ -711,6 +746,98 @@ def render_header():
             st.session_state.selected_model = selected_model
         except Exception as e:
             st.session_state.selected_model = config.OLLAMA_CHAT_MODEL
+        
+        # INVENT LAW button
+        if st.button("⚡ INVENT LAW", type="primary", key="invent_law_button", use_container_width=True):
+            st.session_state.show_invent_law = True
+            st.rerun()
+    
+    # INVENT LAW UI (shown when button clicked)
+    if st.session_state.get("show_invent_law", False):
+        with st.expander("⚡ Invent New Law of Thought", expanded=True):
+            goal = st.text_input(
+                "What cognitive process should now exist?",
+                placeholder="e.g. Detect hidden contradictions across decades",
+                key="invent_law_goal"
+            )
+            
+            if goal and st.button("Enact New Law of Thought", key="generate_law"):
+                try:
+                    from src import rag_utils
+                    selected_model = st.session_state.get("selected_model", config.OLLAMA_CHAT_MODEL)
+                    
+                    generation_prompt = f"""
+Goal: {goal}
+
+Create a new process chain in valid YAML format.
+
+Requirements:
+- Name in SCREAMING_SNAKE_CASE
+- 4-6 ruthless steps
+- Each step has: description, prompt, temperature, rag_k
+- No fluff. No explanation. Just the YAML.
+
+Format:
+name: CHAIN_NAME
+description: Brief description
+version: 1.0
+settings:
+  default_temperature: 0.2
+  default_rag_k: 12
+steps:
+  - description: "Step description"
+    prompt: "Step prompt with {{context}} placeholder"
+    temperature: 0.2
+    rag_k: 10
+metadata:
+  created: 2025-01-15
+  author: powercore
+  tags: [cognitive-process]
+"""
+                    
+                    with st.spinner("Generating new law of thought..."):
+                        result = rag_utils.answer_question(
+                            question=generation_prompt,
+                            k=8,
+                            raw_mode=False,
+                            rag_threshold=0.25,
+                            model=selected_model
+                        )
+                        
+                        new_chain_yaml = result.get('response', '')
+                        
+                        # Display generated chain
+                        st.markdown("### Generated Chain:")
+                        st.code(new_chain_yaml, language="yaml")
+                        
+                        # Extract chain name
+                        import re
+                        name_match = re.search(r"name:\s*(\w+)", new_chain_yaml)
+                        if name_match:
+                            chain_name = name_match.group(1)
+                            
+                            # Save button
+                            if st.button("🧠 Make This Law Real", key="save_law"):
+                                chains_dir = Path("prompts/chains")
+                                chains_dir.mkdir(parents=True, exist_ok=True)
+                                
+                                chain_path = chains_dir / f"{chain_name}.yaml"
+                                chain_path.write_text(new_chain_yaml, encoding='utf-8')
+                                
+                                st.success(f"⚡ {chain_name} is now eternal law")
+                                st.session_state.show_invent_law = False
+                                st.rerun()
+                        else:
+                            st.warning("Could not extract chain name from generated YAML")
+                
+                except Exception as e:
+                    st.error(f"Error generating law: {e}")
+                    logger.error(f"Error in INVENT LAW: {e}")
+            
+            # Close button
+            if st.button("Cancel", key="cancel_invent_law"):
+                st.session_state.show_invent_law = False
+                st.rerun()
     
 
 # Phase 1: Collapsible Sidebar
@@ -753,6 +880,9 @@ def render_sidebar():
             
             # === V2.0 NEW EXPANDERS ===
             
+            # 0. Attention Flow Visualization
+            render_attention_map()
+            
             # 1. Active Context Expander
             with st.expander("🎯 Active Context", expanded=True):
                 if st.session_state.current_thread:
@@ -785,15 +915,47 @@ def render_sidebar():
                     st.caption("🔗 Connected Notes")
                     for note in related[:3]:
                         score_class = "relevance-high" if note['score'] >= 0.7 else ("relevance-medium" if note['score'] >= 0.4 else "relevance-low")
-                        st.markdown(f"""
-                        <a href="#" class="note-link" onclick="return false;">
-                            {note['title']} <span class="relevance-badge {score_class}">
-                                {note['score']:.0%}
-                            </span>
-                        </a>
-                        """, unsafe_allow_html=True)
-                        if st.button(f"Inject Context", key=f"inject_{note['id']}", use_container_width=True):
-                            st.info(f"Injecting context from: {note['title']}")
+                        
+                        with st.expander(f"📄 {note['title']} ({note['score']:.0%})", expanded=False):
+                            # Show preview
+                            note_content = safe_execute(
+                                lambda: inject_note_context(note['source']),
+                                fallback_value=None,
+                                error_message="Could not load note"
+                            )
+                            
+                            if note_content:
+                                preview = note_content[:300] + "..." if len(note_content) > 300 else note_content
+                                st.caption("Preview:")
+                                st.markdown(preview)
+                                
+                                col1, col2, col3 = st.columns(3)
+                                
+                                with col1:
+                                    if st.button("💉 Inject", key=f"inject_{note['id']}", use_container_width=True):
+                                        # Add to conversation context
+                                        injected_msg = {
+                                            'role': 'system',
+                                            'content': f"[Context injected from {note['title']}]\n\n{note_content}",
+                                            'metadata': {'type': 'injected_context', 'source': note['source']}
+                                        }
+                                        # Store in session state for next message
+                                        if 'injected_contexts' not in st.session_state:
+                                            st.session_state.injected_contexts = []
+                                        st.session_state.injected_contexts.append(injected_msg)
+                                        st.success(f"✓ Injected {note['title']}")
+                                        st.rerun()
+                                
+                                with col2:
+                                    if st.button("🔗 Open", key=f"open_{note['id']}", use_container_width=True):
+                                        open_in_obsidian(note['source'])
+                                        st.info("Opening in Obsidian...")
+                                
+                                with col3:
+                                    if st.button("📋 Copy", key=f"copy_{note['id']}", use_container_width=True):
+                                        st.code(note_content, language="markdown")
+                            else:
+                                st.caption("Note content not available")
             
             # 2. Knowledge Base Expander
             with st.expander("📚 Knowledge Base", expanded=False):
@@ -851,6 +1013,9 @@ def render_sidebar():
                         <small>Click to expand full graph</small>
                     </div>
                     """, unsafe_allow_html=True)
+            
+            # 2.5. Conversation Branching
+            render_branch_points()
             
             # 3. Memory Streams Expander
             with st.expander("💭 Memory Streams", expanded=False):
@@ -962,6 +1127,16 @@ def render_sidebar():
                     if st.button(prompt, key=f"prompt_{prompt[:10]}", use_container_width=True):
                         st.session_state.prompt_template = prompt
                         st.rerun()
+                
+                st.markdown("---")
+                
+                # Semantic Prompt Discovery
+                suggest_prompts_for_context()
+                
+                st.markdown("---")
+                
+                # Prompt Chain Executor
+                render_prompt_chain_executor()
             
             # 6. Session Context & Obsidian Sync (integrated into System Settings)
             with st.expander("🔧 Session & Sync", expanded=False):
@@ -1094,6 +1269,147 @@ def extract_text_from_image(image_bytes):
 canvas_dir = Path("knowledge/canvas")
 canvas_dir.mkdir(parents=True, exist_ok=True)
 
+def crystallize_with_canvas_integration(conversation_history: List[Dict] = None, entry: Dict = None):
+    """
+    Complete crystallization: Obsidian note + Canvas node + Memory marking
+    
+    Args:
+        conversation_history: Full conversation history (for entire conversation)
+        entry: Single message entry (for single turn)
+    
+    Returns:
+        Tuple of (note_path, connection_count)
+    """
+    import json
+    import os
+    from pathlib import Path
+    from datetime import datetime
+    
+    try:
+        # Determine if this is a full conversation or single turn
+        if conversation_history:
+            # Full conversation crystallization
+            title = st.session_state.current_thread.get('title', 'Untitled Conversation')
+            insights = "\n\n".join([
+                f"**Q:** {m.get('question', '')}\n**A:** {m.get('answer', '')}"
+                for m in conversation_history
+            ])
+            context_messages = conversation_history[-5:]
+        elif entry:
+            # Single turn crystallization
+            title = entry.get('question', 'Untitled')[:50]
+            insights = f"**Q:** {entry.get('question', '')}\n\n**A:** {entry.get('answer', '')}"
+            context_messages = [entry]
+        else:
+            st.error("No conversation data provided")
+            return None, 0
+        
+        # 1. Get related notes for linking
+        context = " ".join([
+            m.get('question', m.get('content', '')) 
+            for m in context_messages
+        ])
+        related = safe_execute(
+            lambda: get_related_notes(context, top_k=10),
+            fallback_value=[],
+            error_message="Could not get related notes"
+        )
+        related_sources = [n['source'] for n in related]
+        
+        # 2. Crystallize to Obsidian vault
+        note_path = safe_execute(
+            lambda: crystallize_to_vault(
+                title=title,
+                content=insights,
+                tags=['crystallized', 'powercore'],
+                linked_notes=related_sources,
+                metadata={'conversation_id': st.session_state.conversation_id}
+            ),
+            fallback_value=None,
+            error_message="Could not crystallize to vault"
+        )
+        
+        if not note_path:
+            return None, 0
+        
+        # 3. Update canvas.json
+        vault_path = Path(os.getenv('OBSIDIAN_VAULT_PATH', './knowledge/notes'))
+        canvas_path = vault_path / 'canvas.json'
+        
+        try:
+            if canvas_path.exists():
+                canvas_data = json.loads(canvas_path.read_text(encoding='utf-8'))
+            else:
+                canvas_data = {'nodes': [], 'edges': []}
+            
+            # Find related nodes already in canvas
+            related_node_ids = []
+            for node in canvas_data.get('nodes', []):
+                node_file = str(node.get('file', ''))
+                if any(src in node_file for src in related_sources):
+                    related_node_ids.append(node['id'])
+            
+            # Calculate position (cluster near related nodes)
+            if related_node_ids:
+                related_nodes = [n for n in canvas_data['nodes'] if n['id'] in related_node_ids]
+                if related_nodes:
+                    avg_x = sum(n.get('x', 0) for n in related_nodes) / len(related_nodes)
+                    avg_y = sum(n.get('y', 0) for n in related_nodes) / len(related_nodes)
+                    new_x = avg_x + 50
+                    new_y = avg_y + 50
+                else:
+                    new_x, new_y = 0, 0
+            else:
+                new_x, new_y = 0, 0
+            
+            # Create new node
+            new_node_id = f"node_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            rel_note_path = note_path.relative_to(vault_path)
+            new_node = {
+                'id': new_node_id,
+                'type': 'file',
+                'file': str(rel_note_path).replace('\\', '/'),
+                'x': int(new_x),
+                'y': int(new_y),
+                'width': 400,
+                'height': 300,
+                'color': '5'
+            }
+            
+            canvas_data['nodes'].append(new_node)
+            
+            # Create edges to related nodes (limit 5)
+            for related_id in related_node_ids[:5]:
+                edge_id = f"edge_{new_node_id}_{related_id}"
+                canvas_data['edges'].append({
+                    'id': edge_id,
+                    'fromNode': new_node_id,
+                    'toNode': related_id,
+                    'color': '5',
+                    'label': 'crystallized from'
+                })
+            
+            # Save canvas
+            canvas_path.write_text(json.dumps(canvas_data, indent=2), encoding='utf-8')
+            connection_count = len(related_node_ids)
+            
+        except Exception as e:
+            logger.warning(f"Could not update canvas: {e}")
+            connection_count = 0
+        
+        # 4. Mark in memory store
+        safe_execute(
+            lambda: mark_crystallized(st.session_state.conversation_id, str(note_path)),
+            fallback_value=False,
+            error_message="Could not mark as crystallized"
+        )
+        
+        return note_path, connection_count
+    
+    except Exception as e:
+        logger.error(f"Error in crystallize_with_canvas_integration: {e}")
+        return None, 0
+
 def add_to_canvas(canvas_name: str, title: str, content: str, chat_session_id: str = None):
     """Add a card to an Obsidian canvas file."""
     canvas_path = canvas_dir / f"{canvas_name}.canvas"
@@ -1143,6 +1459,387 @@ def render_thinking_animation():
         Thinking<span>.</span><span>.</span><span>.</span>
     </div>
     """
+
+# === ATTENTION FLOW VISUALIZATION ===
+def render_attention_map():
+    """Visualize which notes are being used most in the current session"""
+    try:
+        # Track note access in session state
+        if 'note_access_tracking' not in st.session_state:
+            st.session_state.note_access_tracking = {}
+        
+        # Update tracking from current RAG context and related notes
+        if st.session_state.get('rag_context'):
+            for chunk in st.session_state.rag_context:
+                source = chunk.get('source', 'unknown')
+                if source != 'unknown':
+                    if source not in st.session_state.note_access_tracking:
+                        st.session_state.note_access_tracking[source] = {
+                            'count': 0,
+                            'last_accessed': None
+                        }
+                    st.session_state.note_access_tracking[source]['count'] += 1
+                    st.session_state.note_access_tracking[source]['last_accessed'] = time.time()
+        
+        if st.session_state.get('related_notes'):
+            for note in st.session_state.related_notes:
+                source = note.get('source', 'unknown')
+                if source != 'unknown':
+                    if source not in st.session_state.note_access_tracking:
+                        st.session_state.note_access_tracking[source] = {
+                            'count': 0,
+                            'last_accessed': None
+                        }
+                    st.session_state.note_access_tracking[source]['count'] += 1
+                    st.session_state.note_access_tracking[source]['last_accessed'] = time.time()
+        
+        # Show visualization if we have tracked notes
+        if st.session_state.note_access_tracking:
+            with st.expander("🧠 Knowledge Attention Map", expanded=False):
+                # Sort by access count
+                sorted_notes = sorted(
+                    st.session_state.note_access_tracking.items(),
+                    key=lambda x: x[1]['count'],
+                    reverse=True
+                )[:10]  # Top 10
+                
+                if sorted_notes:
+                    try:
+                        import plotly.graph_objects as go
+                        
+                        notes = [Path(n[0]).stem for n in sorted_notes]
+                        counts = [n[1]['count'] for n in sorted_notes]
+                        
+                        fig = go.Figure(data=[go.Bar(
+                            x=notes,
+                            y=counts,
+                            marker=dict(
+                                color=counts,
+                                colorscale='Viridis',
+                                showscale=True
+                            )
+                        )])
+                        
+                        fig.update_layout(
+                            title="Most Referenced Notes This Session",
+                            xaxis_title="Note",
+                            yaxis_title="Times Referenced",
+                            height=300,
+                            template='plotly_dark'
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    except ImportError:
+                        # Fallback to simple text list if Plotly not available
+                        st.caption("Most Referenced Notes:")
+                        for note_path, stats in sorted_notes[:5]:
+                            note_name = Path(note_path).stem
+                            st.markdown(f"- **{note_name}**: {stats['count']} references")
+                    except Exception as e:
+                        logger.error(f"Error rendering attention map: {e}")
+                        st.caption("Could not render attention map")
+    
+    except Exception as e:
+        logger.error(f"Error in render_attention_map: {e}")
+        # Fail silently
+
+# === CONVERSATION BRANCHING ===
+def render_branch_points():
+    """Allow branching at any message point"""
+    if not st.session_state.chat_history:
+        return
+    
+    with st.expander("🔀 Conversation Branches", expanded=False):
+        st.caption("Fork conversation at any point")
+        
+        # Show last 5 messages as branch points
+        for idx in range(len(st.session_state.chat_history) - 1, max(-1, len(st.session_state.chat_history) - 6), -1):
+            entry = st.session_state.chat_history[idx]
+            if entry.get('question'):
+                question_preview = entry['question'][:40] + "..." if len(entry['question']) > 40 else entry['question']
+                
+                if st.button(
+                    f"Branch from msg {idx}",
+                    key=f"branch_{idx}",
+                    use_container_width=True,
+                    help=question_preview
+                ):
+                    create_branch(idx)
+
+def create_branch(branch_point: int):
+    """Create a new conversation branch from a specific message point"""
+    try:
+        if branch_point < 0 or branch_point >= len(st.session_state.chat_history):
+            st.error("Invalid branch point")
+            return
+        
+        # Create new conversation from branch point
+        new_thread_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        
+        # Copy messages up to branch point
+        branched_messages = st.session_state.chat_history[:branch_point + 1].copy()
+        
+        # Save as new thread
+        safe_execute(
+            lambda: store_conversation(
+                conversation_id=new_thread_id,
+                messages=branched_messages,
+                title=f"Branch from: {branched_messages[0].get('question', 'Untitled')[:50]}",
+                tags=['branch'],
+                metadata={
+                    'parent_thread': st.session_state.conversation_id,
+                    'branch_point': branch_point,
+                    'original_thread': st.session_state.conversation_id
+                }
+            ),
+            fallback_value=False,
+            error_message="Could not create branch"
+        )
+        
+        # Switch to new thread
+        st.session_state.conversation_id = new_thread_id
+        st.session_state.chat_history = branched_messages
+        
+        # Update thread info
+        st.session_state.current_thread = {
+            'id': new_thread_id,
+            'title': f"Branch from: {branched_messages[0].get('question', 'Untitled')[:50]}",
+            'message_count': len(branched_messages)
+        }
+        
+        st.success(f"✓ Branched conversation at message {branch_point}")
+        st.rerun()
+    
+    except Exception as e:
+        logger.error(f"Error creating branch: {e}")
+        st.error(f"Failed to create branch: {e}")
+
+# === SEMANTIC PROMPT DISCOVERY ===
+def suggest_prompts_for_context():
+    """AI-powered prompt suggestions based on conversation context"""
+    try:
+        if not st.session_state.chat_history:
+            return
+        
+        # Get recent conversation context
+        recent_messages = " ".join([
+            m.get('question', m.get('content', '')) 
+            for m in st.session_state.chat_history[-3:]
+        ])
+        
+        if not recent_messages:
+            return
+        
+        # Embed conversation context
+        from src.rag_utils import embed_texts
+        import numpy as np
+        
+        conv_embedding = embed_texts([recent_messages])[0]
+        
+        # Define prompt library with descriptions
+        prompt_library = [
+            {
+                'name': 'Analyze and synthesize',
+                'description': 'Break down complex topics and synthesize insights',
+                'text': 'Analyze and synthesize the key points from the context, identifying patterns and connections.'
+            },
+            {
+                'name': 'Extract key insights',
+                'description': 'Pull out the most important takeaways',
+                'text': 'Extract the key insights and actionable items from the context.'
+            },
+            {
+                'name': 'Compare and contrast',
+                'description': 'Find similarities and differences',
+                'text': 'Compare and contrast the different perspectives or approaches mentioned in the context.'
+            },
+            {
+                'name': 'Crystallize conversation',
+                'description': 'Save valuable insights to Obsidian',
+                'text': 'Crystallize the most valuable insights from this conversation into a structured note.'
+            },
+            {
+                'name': 'Critical path analysis',
+                'description': 'Find highest-leverage actions',
+                'text': 'Identify the critical path and highest-leverage actions from the context.'
+            },
+            {
+                'name': 'Generate questions',
+                'description': 'Create probing questions to explore deeper',
+                'text': 'Generate thoughtful questions that would help explore the context more deeply.'
+            }
+        ]
+        
+        # Embed all prompts
+        prompt_texts = [p['text'] for p in prompt_library]
+        prompt_embeddings = embed_texts(prompt_texts)
+        
+        # Calculate cosine similarities
+        conv_vec = np.array(conv_embedding)
+        similarities = []
+        
+        for idx, prompt_vec in enumerate(prompt_embeddings):
+            prompt_array = np.array(prompt_vec)
+            # Cosine similarity
+            dot_product = np.dot(conv_vec, prompt_array)
+            norm_conv = np.linalg.norm(conv_vec)
+            norm_prompt = np.linalg.norm(prompt_array)
+            
+            if norm_conv > 0 and norm_prompt > 0:
+                similarity = dot_product / (norm_conv * norm_prompt)
+            else:
+                similarity = 0.0
+            
+            similarities.append((prompt_library[idx], similarity))
+        
+        # Sort by similarity and get top 3
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        top_prompts = similarities[:3]
+        
+        # Show suggestions if relevance > 0.6
+        if top_prompts and top_prompts[0][1] > 0.6:
+            st.caption("💡 Suggested Prompts")
+            for prompt_data, score in top_prompts:
+                if score > 0.6:
+                    if st.button(
+                        f"▶ {prompt_data['name']} ({score:.0%})",
+                        key=f"suggest_{prompt_data['name']}",
+                        use_container_width=True,
+                        help=prompt_data['description']
+                    ):
+                        # Execute the suggested prompt
+                        st.session_state.prompt_template = prompt_data['text']
+                        st.rerun()
+    
+    except Exception as e:
+        logger.error(f"Error in semantic prompt discovery: {e}")
+        # Fail silently - don't show error to user
+
+# === PROMPT CHAIN EXECUTOR ===
+def render_prompt_chain_executor():
+    """UI component for executing prompt chains"""
+    try:
+        from src.app.utils.prompt_chains import PromptChain, execute_chain
+        
+        chain_executor = PromptChain()
+        
+        # List available chains
+        chains = chain_executor.list_chains()
+        
+        if not chains:
+            st.caption("No chains found. Create chains in prompts/chains/")
+            return
+        
+        st.caption("⛓️ Prompt Chains")
+        
+        # Select chain
+        selected_chain = st.selectbox(
+            "Select Chain",
+            chains,
+            key="prompt_chain_selector",
+            label_visibility="collapsed"
+        )
+        
+        if selected_chain:
+            # Load chain config
+            chain_config = chain_executor.load_chain(selected_chain)
+            
+            if chain_config:
+                st.caption(chain_config.get('description', ''))
+                st.caption(f"Steps: {len(chain_config.get('steps', []))}")
+                
+                if st.button("▶ Execute Chain", key="execute_prompt_chain", use_container_width=True):
+                    # Get initial input (last few messages or user input)
+                    if st.session_state.chat_history:
+                        initial_input = " ".join([
+                            m.get('question', m.get('content', '')) 
+                            for m in st.session_state.chat_history[-3:]
+                        ])
+                    else:
+                        initial_input = "No conversation context available"
+                    
+                    # Create LLM function wrapper
+                    def llm_function(prompt: str, temperature: float, rag_k: int) -> str:
+                        """Wrapper to call existing LLM function"""
+                        try:
+                            from src import rag_utils
+                            selected_model = st.session_state.get("selected_model", config.OLLAMA_CHAT_MODEL)
+                            
+                            result = rag_utils.answer_question(
+                                question=prompt,
+                                k=rag_k,
+                                raw_mode=False,
+                                rag_threshold=0.25,
+                                model=selected_model
+                            )
+                            
+                            return result.get('response', '')
+                        except Exception as e:
+                            logger.error(f"LLM call failed in prompt chain: {e}")
+                            raise
+                    
+                    # Execute with debug callbacks
+                    execution_container = st.container()
+                    
+                    with execution_container:
+                        st.markdown("### Execution Log")
+                        
+                        step_placeholders = {}
+                        
+                        def debug_callback(step_result):
+                            """Update UI for each step"""
+                            step_num = step_result['step_number']
+                            
+                            if step_num not in step_placeholders:
+                                step_placeholders[step_num] = st.expander(
+                                    f"Step {step_result['step_number']}: {step_result['description']}",
+                                    expanded=True
+                                )
+                            
+                            with step_placeholders[step_num]:
+                                st.caption("Input:")
+                                st.code(step_result['input'][:200] + '...' if len(step_result['input']) > 200 else step_result['input'])
+                                
+                                if step_result['success']:
+                                    st.caption("Output:")
+                                    st.markdown(step_result['output'])
+                                    st.success("✓ Step completed")
+                                else:
+                                    st.error(f"❌ {step_result['error']}")
+                        
+                        # Execute chain
+                        result = execute_chain(
+                            chain_config=chain_config,
+                            initial_input=initial_input,
+                            llm_function=llm_function,
+                            debug_callback=debug_callback
+                        )
+                        
+                        if result['success']:
+                            st.markdown("### Final Output")
+                            st.markdown(result['final_output'])
+                            st.balloons()
+                            
+                            # Optionally add to conversation
+                            if st.button("Add to Conversation", key="add_chain_result"):
+                                st.session_state.chat_history.append({
+                                    'question': f"[Chain: {selected_chain}]",
+                                    'answer': result['final_output'],
+                                    'sources': [],
+                                    'context': '',
+                                    'mode': '⛓️ Prompt Chain',
+                                    'max_relevance': 1.0,
+                                    'model': 'chain',
+                                    'rag_threshold': 0.0,
+                                    'conversation_id': st.session_state.conversation_id
+                                })
+                                st.rerun()
+                        else:
+                            st.error(f"Chain failed: {result['error']}")
+    
+    except Exception as e:
+        logger.error(f"Error rendering prompt chain executor: {e}")
+        st.caption(f"Error: {e}")
 
 # === RAG TRANSPARENCY COMPONENT ===
 def render_rag_transparency():
@@ -1217,22 +1914,28 @@ def render_rag_transparency():
             col1, col2, col3 = st.columns([1, 1, 4])
             with col1:
                 if st.button("↑ Boost", key=f"boost_{chunk['id']}", help="Increase relevance"):
-                    if adjust_chunk_relevance(
-                        chunk['id'], 
-                        chunk.get('source', ''),
-                        +0.1,
-                        st.session_state.conversation_id
-                    ):
-                        st.success("✓")
+                    success = adjust_chunk_relevance(
+                        chunk_id=chunk['id'], 
+                        source=chunk.get('source', ''),
+                        adjustment=0.1,
+                        conversation_id=st.session_state.conversation_id,
+                        query=query
+                    )
+                    if success:
+                        st.success("✓ Boosted!")
+                        st.rerun()
             with col2:
                 if st.button("↓ Lower", key=f"lower_{chunk['id']}", help="Decrease relevance"):
-                    if adjust_chunk_relevance(
-                        chunk['id'], 
-                        chunk.get('source', ''),
-                        -0.1,
-                        st.session_state.conversation_id
-                    ):
-                        st.info("✓")
+                    success = adjust_chunk_relevance(
+                        chunk_id=chunk['id'], 
+                        source=chunk.get('source', ''),
+                        adjustment=-0.1,
+                        conversation_id=st.session_state.conversation_id,
+                        query=query
+                    )
+                    if success:
+                        st.info("✓ Lowered!")
+                        st.rerun()
 
 # Render header
 render_header()
@@ -1275,18 +1978,32 @@ if st.session_state.current_page == "chat":
         with col1:
             if st.button("💎 Crystallize Entire Conversation", type="primary", use_container_width=True):
                 try:
-                    filepath = crystallize_conversation(st.session_state.chat_history)
-                    if st.session_state.chat_logger:
-                        for entry in st.session_state.chat_history:
-                            if entry.get("ai_log_id"):
-                                try:
-                                    st.session_state.chat_logger.mark_crystallized(
-                                        entry["ai_log_id"],
-                                        filepath
-                                    )
-                                except Exception as e:
-                                    logger.warning(f"Failed to mark message as crystallized: {e}")
-                    st.success(f"✅ Conversation crystallized → `{filepath}`")
+                    # Use new canvas-integrated crystallization
+                    note_path, connection_count = crystallize_with_canvas_integration(
+                        conversation_history=st.session_state.chat_history
+                    )
+                    
+                    if note_path:
+                        # Also call original crystallize for backward compatibility
+                        filepath = crystallize_conversation(st.session_state.chat_history)
+                        
+                        if st.session_state.chat_logger:
+                            for entry in st.session_state.chat_history:
+                                if entry.get("ai_log_id"):
+                                    try:
+                                        st.session_state.chat_logger.mark_crystallized(
+                                            entry["ai_log_id"],
+                                            filepath
+                                        )
+                                    except Exception as e:
+                                        logger.warning(f"Failed to mark message as crystallized: {e}")
+                        
+                        success_msg = f"✅ Conversation crystallized → `{note_path.name}`"
+                        if connection_count > 0:
+                            success_msg += f"\n✓ Added to canvas with {connection_count} connections"
+                        st.success(success_msg)
+                    else:
+                        st.error("Failed to crystallize conversation")
                 except Exception as e:
                     st.error(f"Failed to crystallize conversation: {e}")
         st.markdown("---")
@@ -1337,6 +2054,12 @@ if st.session_state.current_page == "chat":
                                     "conversation_id": last_entry.get("conversation_id", st.session_state.conversation_id)
                                 }
                                 
+                                # Use canvas-integrated crystallization
+                                note_path, connection_count = crystallize_with_canvas_integration(
+                                    entry=last_entry
+                                )
+                                
+                                # Also call original for backward compatibility
                                 filepath = crystallize_turn(
                                     last_entry['question'],
                                     last_entry['answer'],
@@ -1355,7 +2078,10 @@ if st.session_state.current_page == "chat":
                                     except Exception as e:
                                         logger.warning(f"Failed to mark message as crystallized: {e}")
                                 
-                                st.toast(f"Crystallized → `{filepath.split('/')[-1]}`", icon="✅")
+                                toast_msg = f"Crystallized → `{filepath.split('/')[-1]}`"
+                                if note_path and connection_count > 0:
+                                    toast_msg += f" (+ {connection_count} canvas connections)"
+                                st.toast(toast_msg, icon="✅")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Failed to crystallize: {e}")
@@ -1624,6 +2350,12 @@ if st.session_state.current_page == "chat":
                     "conversation_id": entry.get("conversation_id", st.session_state.conversation_id)
                 }
                 
+                # Use canvas-integrated crystallization
+                note_path, connection_count = crystallize_with_canvas_integration(
+                    entry=entry
+                )
+                
+                # Also call original for backward compatibility
                 filepath = crystallize_turn(
                     entry['question'], 
                     entry['answer'], 
@@ -1642,7 +2374,10 @@ if st.session_state.current_page == "chat":
                     except Exception as e:
                         logger.warning(f"Failed to mark message as crystallized: {e}")
                 
-                st.toast(f"Crystallized → `{filepath.split('/')[-1]}`", icon="✅")
+                toast_msg = f"Crystallized → `{filepath.split('/')[-1]}`"
+                if note_path and connection_count > 0:
+                    toast_msg += f" (+ {connection_count} canvas connections)"
+                st.toast(toast_msg, icon="✅")
                 # Clear URL param
                 st.query_params.clear()
                 st.rerun()

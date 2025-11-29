@@ -1,0 +1,47 @@
+name: CRITICAL_PATH_ANALYSIS
+description: Find the single highest-leverage action from context
+version: 1.0
+
+settings:
+  default_temperature: 0.2
+  default_rag_k: 12
+
+steps:
+  - description: "Extract assumptions"
+    prompt: |
+      Given this context:
+      {context}
+      
+      List every assumption present in the text.
+      Format as numbered list.
+    temperature: 0.3
+    rag_k: 10
+  
+  - description: "Score assumptions by risk"
+    prompt: |
+      Given these assumptions:
+      {context}
+      
+      Score each assumption on two dimensions:
+      1. Risk if wrong (catastrophic/high/medium/low)
+      2. Impact on outcome (1-10)
+      
+      Format as table.
+    temperature: 0.2
+    rag_k: 8
+  
+  - description: "Identify highest leverage action"
+    prompt: |
+      Given this risk analysis:
+      {context}
+      
+      Identify the single assumption with highest leverage (risk × impact).
+      Output ONLY the highest-leverage action item in one sentence.
+    temperature: 0.1
+    rag_k: 5
+
+metadata:
+  created: 2025-01-15
+  author: powercore
+  tags: [analysis, decision-making, critical-thinking]
+

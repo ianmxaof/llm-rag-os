@@ -1,0 +1,32 @@
+name: LEVERAGE_MATRIX
+description: 2x2 effort vs impact matrix, pick low-effort/high-impact actions
+version: 1.0
+
+settings:
+  default_temperature: 0.1
+  default_rag_k: 12
+
+steps:
+  - description: "2x2 effort vs impact"
+    prompt: |
+      From this context:
+      {context}
+      
+      Extract every possible action. Plot on 2x2 grid: Effort (low/high) × Impact (low/high). Output as markdown table with columns: Action | Effort | Impact | Quadrant
+    temperature: 0.2
+    rag_k: 12
+  
+  - description: "Pick the obvious winner"
+    prompt: |
+      From this leverage matrix:
+      {context}
+      
+      Output ONLY the single action in the Low Effort / High Impact quadrant. If none exists, output the highest leverage action overall.
+    temperature: 0.0
+    rag_k: 5
+
+metadata:
+  created: 2025-01-15
+  author: powercore
+  tags: [decision-making, leverage, prioritization]
+

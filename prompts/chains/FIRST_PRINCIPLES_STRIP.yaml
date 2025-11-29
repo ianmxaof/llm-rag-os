@@ -1,0 +1,32 @@
+name: FIRST_PRINCIPLES_STRIP
+description: Strip context to atomic facts, then reconstruct from ground up
+version: 1.0
+
+settings:
+  default_temperature: 0.1
+  default_rag_k: 20
+
+steps:
+  - description: "Strip to atomic facts"
+    prompt: |
+      From this context:
+      {context}
+      
+      Extract only verifiable atomic facts. One fact per line. No interpretation.
+    temperature: 0.0
+    rag_k: 20
+  
+  - description: "Reconstruct from ground up"
+    prompt: |
+      Using only the atomic facts above:
+      {context}
+      
+      Reconstruct the core argument from first principles. Question everything that isn't directly supported.
+    temperature: 0.1
+    rag_k: 10
+
+metadata:
+  created: 2025-01-15
+  author: powercore
+  tags: [analysis, first-principles, reasoning]
+

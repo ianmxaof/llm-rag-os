@@ -1,0 +1,23 @@
+name: SYNTHESIS_COMPRESSION
+description: Compress context into one perfect sentence of pure leverage
+version: 1.0
+
+settings:
+  default_temperature: 0.3
+  default_rag_k: 50
+
+steps:
+  - description: "One-sentence essence"
+    prompt: |
+      From this context:
+      {context}
+      
+      Compress everything into one perfect sentence that contains 100% of the leverage. No fluff. Maximum density.
+    temperature: 0.3
+    rag_k: 50
+
+metadata:
+  created: 2025-01-15
+  author: powercore
+  tags: [synthesis, compression, essence]
+

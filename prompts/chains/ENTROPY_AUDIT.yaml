@@ -1,0 +1,32 @@
+name: ENTROPY_AUDIT
+description: Find decaying assumptions and recommend renewal actions
+version: 1.0
+
+settings:
+  default_temperature: 0.15
+  default_rag_k: 15
+
+steps:
+  - description: "Find decaying assumptions"
+    prompt: |
+      Given this context:
+      {context}
+      
+      Identify every claim older than 6 months or based on transient conditions. List with decay risk (high/medium/low).
+    temperature: 0.2
+    rag_k: 15
+  
+  - description: "Recommend renewal actions"
+    prompt: |
+      For each decaying claim identified:
+      {context}
+      
+      Output a single verification or update action for each one.
+    temperature: 0.1
+    rag_k: 10
+
+metadata:
+  created: 2025-01-15
+  author: powercore
+  tags: [maintenance, entropy, knowledge-management]
+
