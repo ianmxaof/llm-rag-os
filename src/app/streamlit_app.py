@@ -51,21 +51,886 @@ from src.app.utils.obsidian_bridge import get_related_notes, inject_note_context
 from src.app.utils.memory_store import get_memory_streams, load_conversation_by_id, store_conversation, mark_crystallized, search_conversations
 from typing import Callable, Any
 
+# === FUNCTION DEFINITIONS (must be before sidebar) ===
+# === ATOMIC STATE UPDATE FUNCTION ===
+def update_conversation_state(new_message: Optional[Dict] = None):
+    """Atomic state update after message - prevents race conditions"""
+    # Store message if provided
+    if new_message:
+        st.session_state.chat_history.append(new_message)
+    
+    # Batch compute related data ONCE
+    if st.session_state.chat_history:
+        context = " ".join([
+            m.get('question', m.get('content', '')) 
+            for m in st.session_state.chat_history[-3:]
+        ])
+        
+        # Update all state together atomically
+        st.session_state.update({
+            'related_notes': safe_execute(
+                lambda: get_related_notes(context, top_k=5),
+                fallback_value=[],
+                error_message="Could not update related notes"
+            ),
+            'current_thread': {
+                'id': st.session_state.conversation_id,
+                'title': (
+                    st.session_state.chat_history[0].get('question', 'New Thread')[:50]
+                    if st.session_state.chat_history
+                    else 'New Thread'
+                ),
+                'message_count': len(st.session_state.chat_history)
+            },
+            'rag_context': safe_execute(
+                lambda: get_rag_context(
+                    st.session_state.chat_history[-1].get('question', ''),
+                    k=st.session_state.settings.get('top_k', 8),
+                    settings=st.session_state.settings
+                ) if st.session_state.chat_history else [],
+                fallback_value=[],
+                error_message="Could not update RAG context"
+            )
+        })
+        
+        # Update memory streams (less frequently - every 5 messages)
+        if len(st.session_state.chat_history) % 5 == 0:
+            st.session_state.memory_streams = safe_execute(
+                lambda: get_memory_streams(),
+                fallback_value=[],
+                error_message="Could not update memory streams"
+            )
+        
+        # Store conversation to persistent memory store
+        safe_execute(
+            lambda: store_conversation(
+                conversation_id=st.session_state.conversation_id,
+                messages=st.session_state.chat_history,
+                title=st.session_state.current_thread.get('title'),
+                tags=st.session_state.get('current_tags', []),
+                metadata={
+                    'related_notes': [n['source'] for n in st.session_state.get('related_notes', [])]
+                }
+            ),
+            fallback_value=False,
+            error_message="Could not store conversation"
+        )
+
+# === LOAD CONVERSATION FUNCTION ===
+def load_conversation(conversation_id: str):
+    """Restore a previous conversation from memory store"""
+    try:
+        conversation = load_conversation_by_id(conversation_id)
+        if conversation:
+            st.session_state.conversation_id = conversation_id
+            st.session_state.chat_history = conversation.get('messages', [])
+            st.session_state.current_thread = {
+                'id': conversation_id,
+                'title': conversation.get('title', 'Restored Thread'),
+                'message_count': len(conversation.get('messages', []))
+            }
+            update_conversation_state(None)
+            st.success(f"✅ Loaded: {conversation.get('title', 'Conversation')}")
+            st.rerun()
+        else:
+            st.error("Conversation not found")
+    except Exception as e:
+        st.error(f"Failed to load conversation: {e}")
+
+# === ATTENTION FLOW VISUALIZATION ===
+def render_attention_map():
+    """Visualize which notes are being used most in the current session"""
+    try:
+        # Track note access in session state
+        if 'note_access_tracking' not in st.session_state:
+            st.session_state.note_access_tracking = {}
+        
+        # Update tracking from current RAG context and related notes
+        rag_context = st.session_state.get('rag_context', [])
+        if rag_context:
+            for chunk in rag_context:
+                source = chunk.get('source', 'unknown')
+                if source != 'unknown':
+                    if source not in st.session_state.note_access_tracking:
+                        st.session_state.note_access_tracking[source] = {
+                            'count': 0,
+                            'last_accessed': None
+                        }
+                    st.session_state.note_access_tracking[source]['count'] += 1
+                    st.session_state.note_access_tracking[source]['last_accessed'] = time.time()
+        
+        related_notes = st.session_state.get('related_notes', [])
+        if related_notes:
+            for note in related_notes:
+                source = note.get('source', 'unknown')
+                if source != 'unknown':
+                    if source not in st.session_state.note_access_tracking:
+                        st.session_state.note_access_tracking[source] = {
+                            'count': 0,
+                            'last_accessed': None
+                        }
+                    st.session_state.note_access_tracking[source]['count'] += 1
+                    st.session_state.note_access_tracking[source]['last_accessed'] = time.time()
+        
+        # Show visualization if we have tracked notes
+        if st.session_state.note_access_tracking:
+            with st.expander("🧠 Knowledge Attention Map", expanded=False):
+                # Sort by access count
+                sorted_notes = sorted(
+                    st.session_state.note_access_tracking.items(),
+                    key=lambda x: x[1]['count'],
+                    reverse=True
+                )[:10]  # Top 10
+                
+                if sorted_notes:
+                    try:
+                        import plotly.graph_objects as go
+                        
+                        notes = [Path(n[0]).stem for n in sorted_notes]
+                        counts = [n[1]['count'] for n in sorted_notes]
+                        
+                        fig = go.Figure(data=[go.Bar(
+                            x=notes,
+                            y=counts,
+                            marker=dict(
+                                color=counts,
+                                colorscale='Viridis',
+                                showscale=True
+                            )
+                        )])
+                        
+                        fig.update_layout(
+                            title="Most Referenced Notes This Session",
+                            xaxis_title="Note",
+                            yaxis_title="Times Referenced",
+                            height=300,
+                            template='plotly_dark'
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    except ImportError:
+                        # Fallback to simple text list if Plotly not available
+                        st.caption("Most Referenced Notes:")
+                        for note_path, stats in sorted_notes[:5]:
+                            note_name = Path(note_path).stem
+                            st.markdown(f"- **{note_name}**: {stats['count']} references")
+                    except Exception as e:
+                        logger.error(f"Error rendering attention map: {e}")
+                        st.caption("Could not render attention map")
+    
+    except Exception as e:
+        logger.error(f"Error in render_attention_map: {e}")
+        # Fail silently
+
+# === CONVERSATION BRANCHING ===
+def create_branch(branch_point: int):
+    """Create a new conversation branch from a specific message point"""
+    try:
+        if branch_point < 0 or branch_point >= len(st.session_state.chat_history):
+            st.error("Invalid branch point")
+            return
+        
+        # Create new conversation from branch point
+        new_thread_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        
+        # Copy messages up to branch point
+        branched_messages = st.session_state.chat_history[:branch_point + 1].copy()
+        
+        # Save as new thread
+        safe_execute(
+            lambda: store_conversation(
+                conversation_id=new_thread_id,
+                messages=branched_messages,
+                title=f"Branch from: {branched_messages[0].get('question', 'Untitled')[:50]}",
+                tags=['branch'],
+                metadata={
+                    'parent_thread': st.session_state.conversation_id,
+                    'branch_point': branch_point,
+                    'original_thread': st.session_state.conversation_id
+                }
+            ),
+            fallback_value=False,
+            error_message="Could not create branch"
+        )
+        
+        # Switch to new thread
+        st.session_state.conversation_id = new_thread_id
+        st.session_state.chat_history = branched_messages
+        
+        # Update thread info
+        st.session_state.current_thread = {
+            'id': new_thread_id,
+            'title': f"Branch from: {branched_messages[0].get('question', 'Untitled')[:50]}",
+            'message_count': len(branched_messages)
+        }
+        
+        st.success(f"✓ Branched conversation at message {branch_point}")
+        st.rerun()
+    
+    except Exception as e:
+        logger.error(f"Error creating branch: {e}")
+        st.error(f"Failed to create branch: {e}")
+
+def render_branch_points():
+    """Allow branching at any message point"""
+    chat_history = st.session_state.get("chat_history", [])
+    if not chat_history:
+        return
+    
+    with st.expander("🔀 Conversation Branches", expanded=False):
+        st.caption("Fork conversation at any point")
+        
+        # Show last 5 messages as branch points
+        for idx in range(len(chat_history) - 1, max(-1, len(chat_history) - 6), -1):
+            entry = chat_history[idx]
+            if entry.get('question'):
+                question_preview = entry['question'][:40] + "..." if len(entry['question']) > 40 else entry['question']
+                
+                if st.button(
+                    f"Branch from msg {idx}",
+                    key=f"branch_{idx}",
+                    use_container_width=True,
+                    help=question_preview
+                ):
+                    create_branch(idx)
+
+# === SEMANTIC PROMPT DISCOVERY ===
+def suggest_prompts_for_context():
+    """AI-powered prompt suggestions based on conversation context"""
+    try:
+        chat_history = st.session_state.get("chat_history", [])
+        if not chat_history:
+            return
+        
+        # Get recent conversation context
+        recent_messages = " ".join([
+            m.get('question', m.get('content', '')) 
+            for m in chat_history[-3:]
+        ])
+        
+        if not recent_messages:
+            return
+        
+        # Embed conversation context
+        from src.rag_utils import embed_texts
+        import numpy as np
+        
+        conv_embedding = embed_texts([recent_messages])[0]
+        
+        # Define prompt library with descriptions
+        prompt_library = [
+            {
+                'name': 'Analyze and synthesize',
+                'description': 'Break down complex topics and synthesize insights',
+                'text': 'Analyze and synthesize the key points from the context, identifying patterns and connections.'
+            },
+            {
+                'name': 'Extract key insights',
+                'description': 'Pull out the most important takeaways',
+                'text': 'Extract the key insights and actionable items from the context.'
+            },
+            {
+                'name': 'Compare and contrast',
+                'description': 'Find similarities and differences',
+                'text': 'Compare and contrast the different perspectives or approaches mentioned in the context.'
+            },
+            {
+                'name': 'Crystallize conversation',
+                'description': 'Save valuable insights to Obsidian',
+                'text': 'Crystallize the most valuable insights from this conversation into a structured note.'
+            },
+            {
+                'name': 'Critical path analysis',
+                'description': 'Find highest-leverage actions',
+                'text': 'Identify the critical path and highest-leverage actions from the context.'
+            },
+            {
+                'name': 'Generate questions',
+                'description': 'Create probing questions to explore deeper',
+                'text': 'Generate thoughtful questions that would help explore the context more deeply.'
+            }
+        ]
+        
+        # Embed all prompts
+        prompt_texts = [p['text'] for p in prompt_library]
+        prompt_embeddings = embed_texts(prompt_texts)
+        
+        # Calculate cosine similarities
+        conv_vec = np.array(conv_embedding)
+        similarities = []
+        
+        for idx, prompt_vec in enumerate(prompt_embeddings):
+            prompt_array = np.array(prompt_vec)
+            # Cosine similarity
+            dot_product = np.dot(conv_vec, prompt_array)
+            norm_conv = np.linalg.norm(conv_vec)
+            norm_prompt = np.linalg.norm(prompt_array)
+            
+            if norm_conv > 0 and norm_prompt > 0:
+                similarity = dot_product / (norm_conv * norm_prompt)
+            else:
+                similarity = 0.0
+            
+            similarities.append((prompt_library[idx], similarity))
+        
+        # Sort by similarity and get top 3
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        top_prompts = similarities[:3]
+        
+        # Show suggestions if relevance > 0.6
+        if top_prompts and top_prompts[0][1] > 0.6:
+            st.caption("💡 Suggested Prompts")
+            for prompt_data, score in top_prompts:
+                if score > 0.6:
+                    if st.button(
+                        f"▶ {prompt_data['name']} ({score:.0%})",
+                        key=f"suggest_{prompt_data['name']}",
+                        use_container_width=True,
+                        help=prompt_data['description']
+                    ):
+                        # Execute the suggested prompt
+                        st.session_state.prompt_template = prompt_data['text']
+                        st.rerun()
+    
+    except Exception as e:
+        logger.error(f"Error in semantic prompt discovery: {e}")
+        # Fail silently - don't show error to user
+
+# === PROMPT CHAIN EXECUTOR ===
+def render_prompt_chain_executor():
+    """UI component for executing prompt chains"""
+    try:
+        from src.app.utils.prompt_chains import PromptChain, execute_chain
+        
+        chain_executor = PromptChain()
+        
+        # List available chains
+        chains = chain_executor.list_chains()
+        
+        if not chains:
+            st.caption("No chains found. Create chains in prompts/chains/")
+            return
+        
+        st.caption("⛓️ Prompt Chains")
+        
+        # Select chain
+        selected_chain = st.selectbox(
+            "Select Chain",
+            chains,
+            key="prompt_chain_selector",
+            label_visibility="collapsed"
+        )
+        
+        if selected_chain:
+            # Load chain config
+            chain_config = chain_executor.load_chain(selected_chain)
+            
+            if chain_config:
+                st.caption(chain_config.get('description', ''))
+                st.caption(f"Steps: {len(chain_config.get('steps', []))}")
+                
+                if st.button("▶ Execute Chain", key="execute_prompt_chain", use_container_width=True):
+                    # Get initial input (last few messages or user input)
+                    chat_history = st.session_state.get("chat_history", [])
+                    if chat_history:
+                        initial_input = " ".join([
+                            m.get('question', m.get('content', '')) 
+                            for m in chat_history[-3:]
+                        ])
+                    else:
+                        initial_input = "No conversation context available"
+                    
+                    # Create LLM function wrapper
+                    def llm_function(prompt: str, temperature: float, rag_k: int) -> str:
+                        """Wrapper to call existing LLM function"""
+                        try:
+                            from src import rag_utils
+                            selected_model = st.session_state.get("selected_model", config.OLLAMA_CHAT_MODEL)
+                            
+                            result = rag_utils.answer_question(
+                                question=prompt,
+                                k=rag_k,
+                                raw_mode=False,
+                                rag_threshold=0.25,
+                                model=selected_model
+                            )
+                            
+                            return result.get('response', '')
+                        except Exception as e:
+                            logger.error(f"LLM call failed in prompt chain: {e}")
+                            raise
+                    
+                    # Execute with debug callbacks
+                    execution_container = st.container()
+                    
+                    with execution_container:
+                        st.markdown("### Execution Log")
+                        
+                        step_placeholders = {}
+                        
+                        def debug_callback(step_result):
+                            """Update UI for each step"""
+                            step_num = step_result['step_number']
+                            
+                            if step_num not in step_placeholders:
+                                step_placeholders[step_num] = st.expander(
+                                    f"Step {step_result['step_number']}: {step_result['description']}",
+                                    expanded=True
+                                )
+                            
+                            with step_placeholders[step_num]:
+                                st.caption("Input:")
+                                st.code(step_result['input'][:200] + '...' if len(step_result['input']) > 200 else step_result['input'])
+                                
+                                if step_result['success']:
+                                    st.caption("Output:")
+                                    st.markdown(step_result['output'])
+                                    st.success("✓ Step completed")
+                                else:
+                                    st.error(f"❌ {step_result['error']}")
+                        
+                        # Execute chain
+                        result = execute_chain(
+                            chain_config=chain_config,
+                            initial_input=initial_input,
+                            llm_function=llm_function,
+                            debug_callback=debug_callback
+                        )
+                        
+                        if result['success']:
+                            st.markdown("### Final Output")
+                            st.markdown(result['final_output'])
+                            st.balloons()
+                            
+                            # Optionally add to conversation
+                            if st.button("Add to Conversation", key="add_chain_result"):
+                                if "chat_history" not in st.session_state:
+                                    st.session_state.chat_history = []
+                                st.session_state.chat_history.append({
+                                    'question': f"[Chain: {selected_chain}]",
+                                    'answer': result['final_output'],
+                                    'sources': [],
+                                    'context': '',
+                                    'mode': '⛓️ Prompt Chain',
+                                    'max_relevance': 1.0,
+                                    'model': 'chain',
+                                    'rag_threshold': 0.0,
+                                    'conversation_id': st.session_state.get("conversation_id", "")
+                                })
+                                st.rerun()
+                        else:
+                            st.error(f"Chain failed: {result['error']}")
+    
+    except Exception as e:
+        logger.error(f"Error rendering prompt chain executor: {e}")
+        st.caption(f"Error: {e}")
+
+# Phase 1: Collapsible Sidebar - Claude/Grok Style
+def render_sidebar_content():
+    """Render sidebar expanders and additional content."""
+    # === V2.0 NEW EXPANDERS ===
+    
+    # 0. Attention Flow Visualization
+    render_attention_map()
+    
+    # 1. Active Context Expander
+    with st.expander("🎯 Active Context", expanded=True):
+        current_thread = st.session_state.get("current_thread")
+        if current_thread:
+            st.markdown(f"""
+            <div style="background: rgba(124, 58, 237, 0.15); border-left: 3px solid #7c3aed; padding: 12px; border-radius: 8px; margin-bottom: 12px;">
+                <strong>{current_thread.get('title', 'Untitled Thread')}</strong><br>
+                <small style="color: rgba(255,255,255,0.5);">
+                    {current_thread.get('message_count', 0)} messages
+                </small>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.caption("No active thread. Start a new thought!")
+        
+        # Related Obsidian notes
+        chat_history = st.session_state.get("chat_history", [])
+        related = safe_execute(
+            lambda: get_related_notes(
+                " ".join([
+                    m.get('question', m.get('content', '')) 
+                    for m in chat_history[-3:]
+                ])
+                if chat_history else "",
+                top_k=5
+            ),
+            fallback_value=[],
+            error_message="Could not load related notes"
+        )
+        
+        if related:
+            st.caption("🔗 Connected Notes")
+            for note in related[:3]:
+                score_class = "relevance-high" if note['score'] >= 0.7 else ("relevance-medium" if note['score'] >= 0.4 else "relevance-low")
+                
+                with st.expander(f"📄 {note['title']} ({note['score']:.0%})", expanded=False):
+                    # Show preview
+                    note_content = safe_execute(
+                        lambda: inject_note_context(note['source']),
+                        fallback_value=None,
+                        error_message="Could not load note"
+                    )
+                    
+                    if note_content:
+                        preview = note_content[:300] + "..." if len(note_content) > 300 else note_content
+                        st.caption("Preview:")
+                        st.markdown(preview)
+                        
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            if st.button("💉 Inject", key=f"inject_{note['id']}", use_container_width=True):
+                                # Add to conversation context
+                                injected_msg = {
+                                    'role': 'system',
+                                    'content': f"[Context injected from {note['title']}]\n\n{note_content}",
+                                    'metadata': {'type': 'injected_context', 'source': note['source']}
+                                }
+                                # Store in session state for next message
+                                if 'injected_contexts' not in st.session_state:
+                                    st.session_state.injected_contexts = []
+                                st.session_state.injected_contexts.append(injected_msg)
+                                st.success(f"✓ Injected {note['title']}")
+                                st.rerun()
+                        
+                        with col2:
+                            if st.button("🔗 Open", key=f"open_{note['id']}", use_container_width=True):
+                                open_in_obsidian(note['source'])
+                                st.info("Opening in Obsidian...")
+                        
+                        with col3:
+                            if st.button("📋 Copy", key=f"copy_{note['id']}", use_container_width=True):
+                                st.code(note_content, language="markdown")
+                    else:
+                        st.caption("Note content not available")
+    
+    # 2. Knowledge Base Expander
+    with st.expander("📚 Knowledge Base", expanded=False):
+        tab1, tab2, tab3 = st.tabs(["Vault", "Documents", "Graph"])
+        
+        with tab1:
+            st.caption("Obsidian Vault Browser")
+            vault_path = Path("./knowledge/notes")
+            if vault_path.exists():
+                folders = safe_execute(
+                    lambda: [d.name for d in vault_path.iterdir() if d.is_dir() and not d.name.startswith('.')],
+                    fallback_value=[],
+                    error_message="Could not list vault folders"
+                )
+                for folder in folders[:5]:
+                    if st.checkbox(f"📁 {folder}", value=False):
+                        st.markdown(f"- 📄 {folder} notes")
+            else:
+                st.caption("Vault not found")
+        
+        with tab2:
+            st.caption("Ingested Documents")
+            docs_result = safe_execute(
+                lambda: list_documents(),
+                fallback_value={"items": [], "total": 0},
+                error_message="Could not load documents"
+            )
+            # Handle both dict response and list response
+            if isinstance(docs_result, dict):
+                docs_list = docs_result.get("items", [])
+            elif isinstance(docs_result, list):
+                docs_list = docs_result
+            else:
+                docs_list = []
+            
+            if docs_list:
+                st.markdown("**Recent:**")
+                for doc in docs_list[:5]:
+                    # Handle both dict and string formats
+                    if isinstance(doc, dict):
+                        doc_name = doc.get('source_path', doc.get('name', 'Unknown'))
+                    else:
+                        doc_name = str(doc)
+                    st.markdown(f"- {doc_name}")
+            else:
+                st.caption("No documents ingested yet")
+            
+            if st.button("➕ Ingest New Document", use_container_width=True):
+                st.info("Use the paperclip icon in the chat input to ingest files")
+        
+        with tab3:
+            st.markdown("""
+            <div style="background: rgba(15, 15, 15, 0.8); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 12px; margin: 8px 0; min-height: 120px; display: flex; align-items: center; justify-content: center; color: rgba(255, 255, 255, 0.4); font-size: 0.85rem;">
+                🌐 Graph View<br>
+                <small>Click to expand full graph</small>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # 2.5. Conversation Branching
+    render_branch_points()
+    
+    # 3. Memory Streams Expander
+    with st.expander("💭 Memory Streams", expanded=False):
+        streams = safe_execute(
+            lambda: get_memory_streams(),
+            fallback_value=[],
+            error_message="Could not load memory streams"
+        )
+        
+        # Group by category
+        today = [s for s in streams if s.get('category') == 'today']
+        week = [s for s in streams if s.get('category') == 'week']
+        
+        if today:
+            st.caption("Today")
+            for stream in today:
+                st.markdown(f"""
+                <div style="padding: 8px 12px; border-radius: 8px; margin: 4px 0; cursor: pointer; background: rgba(30, 30, 30, 0.4); border-left: 2px solid #00ff88;">
+                    <strong>{stream['title']}</strong><br>
+                    <small style="color: rgba(255,255,255,0.5);">
+                        {stream.get('message_count', 0)} messages
+                    </small>
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("Load", key=f"load_{stream['id']}", use_container_width=True):
+                    load_conversation(stream['id'])
+        
+        if week:
+            st.caption("This Week")
+            for stream in week:
+                st.markdown(f"""
+                <div style="padding: 8px 12px; border-radius: 8px; margin: 4px 0; cursor: pointer; background: rgba(30, 30, 30, 0.4);">
+                    <strong>{stream['title']}</strong><br>
+                    <small style="color: rgba(255,255,255,0.5);">
+                        {stream.get('message_count', 0)} messages
+                    </small>
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("Load", key=f"load_{stream['id']}", use_container_width=True):
+                    load_conversation(stream['id'])
+    
+    # 4. System Settings Expander (enhanced)
+    with st.expander("⚙️ System", expanded=False):
+        st.caption("Interaction Preferences")
+        
+        # Ensure settings exists
+        if "settings" not in st.session_state:
+            st.session_state.settings = {}
+        
+        auto_crystallize = st.toggle(
+            "Auto-Crystallize Insights",
+            value=st.session_state.settings.get('auto_crystallize', False),
+            key="auto_crystallize_toggle",
+            help="Automatically save valuable insights to Obsidian"
+        )
+        st.session_state.settings['auto_crystallize'] = auto_crystallize
+        
+        uncensored_mode = st.toggle(
+            "Uncensored Raw Mode",
+            value=st.session_state.settings.get('uncensored_mode', False),
+            key="uncensored_mode_toggle",
+            help="Disable content filters (use responsibly)"
+        )
+        st.session_state.settings['uncensored_mode'] = uncensored_mode
+        st.session_state.raw_mode = uncensored_mode
+        
+        # Advanced RAG tuning
+        st.markdown("---")
+        manual_tuning = st.checkbox(
+            "Manual RAG Tuning",
+            value=st.session_state.settings.get('manual_rag_tuning', False),
+            help="Override automatic RAG parameter optimization"
+        )
+        st.session_state.settings['manual_rag_tuning'] = manual_tuning
+        
+        if manual_tuning:
+            st.caption("⚠️ System auto-tunes these. Override only if needed.")
+            top_k_slider = st.slider(
+                "Context Chunks (Top-K)",
+                min_value=1,
+                max_value=20,
+                value=st.session_state.settings.get('top_k', 8),
+                key="top_k_slider",
+                help="Number of context chunks to retrieve"
+            )
+            st.session_state.settings['top_k'] = top_k_slider
+            st.session_state.top_k = top_k_slider
+            
+            relevance_slider = st.slider(
+                "Relevance Threshold",
+                min_value=0.0,
+                max_value=1.0,
+                value=st.session_state.settings.get('relevance_threshold', 0.25),
+                step=0.05,
+                key="relevance_slider",
+                help="Minimum similarity score for retrieval"
+            )
+            st.session_state.settings['relevance_threshold'] = relevance_slider
+            st.session_state.rag_threshold = relevance_slider
+    
+    # 5. Prompts Library Expander
+    with st.expander("📝 Prompts Library", expanded=False):
+        st.caption("Quick Templates")
+        # TODO: Query prompts from API if available
+        prompts = [
+            "Analyze and synthesize...",
+            "Extract key insights from...",
+            "Compare and contrast...",
+            "Crystallize this conversation"
+        ]
+        
+        for prompt in prompts:
+            if st.button(prompt, key=f"prompt_{prompt[:10]}", use_container_width=True):
+                st.session_state.prompt_template = prompt
+                st.rerun()
+        
+        st.markdown("---")
+        
+        # Semantic Prompt Discovery
+        suggest_prompts_for_context()
+        
+        st.markdown("---")
+        
+        # Prompt Chain Executor
+        render_prompt_chain_executor()
+    
+    # 6. Session Context & Obsidian Sync (integrated into System Settings)
+    with st.expander("🔧 Session & Sync", expanded=False):
+        # Session Context
+        st.caption("Current Focus")
+        current_focus_value = st.session_state.get("current_focus", "General")
+        current_focus = st.selectbox(
+            "What are you working on?",
+            ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"],
+            index=["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"].index(
+                current_focus_value
+            ) if current_focus_value in ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"] else 0,
+            key="sidebar_current_focus",
+            help="What are you working on right now?"
+        )
+        st.session_state.current_focus = current_focus
+        
+        st.markdown("---")
+        
+        # Basic Settings
+        st.caption("Display Preferences")
+        show_context = st.checkbox("Show retrieved context", value=st.session_state.get("show_context", False), key="sidebar_show_context")
+        st.session_state.show_context = show_context
+        
+        st.markdown("---")
+        
+        # Obsidian Sync
+        st.caption("Obsidian Integration")
+        auto_ingest_obsidian = st.checkbox(
+            "Auto-ingest Obsidian notes",
+            value=st.session_state.get("auto_ingest_obsidian", True),
+            key="sidebar_auto_ingest",
+            help="Automatically ingest new/modified notes from knowledge/notes/ folder"
+        )
+        st.session_state.auto_ingest_obsidian = auto_ingest_obsidian
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            try:
+                watcher_status_response = requests.get(f"{API_BASE}/ingest/watch/status", timeout=2)
+                if watcher_status_response.status_code == 200:
+                    watcher_status = watcher_status_response.json().get("notes_watcher", "unknown")
+                    if watcher_status == "running":
+                        st.success("✅ Running")
+                    else:
+                        st.warning(f"⚠️ {watcher_status}")
+                else:
+                    st.info("Unknown")
+            except Exception:
+                st.info("Unknown")
+        
+        with col2:
+            col_start, col_stop = st.columns(2)
+            with col_start:
+                if st.button("▶", key="sidebar_start_watcher"):
+                    try:
+                        response = requests.post(f"{API_BASE}/ingest/watch/notes/start", timeout=5)
+                        if response.status_code == 200:
+                            st.success("Started")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+            with col_stop:
+                if st.button("⏹", key="sidebar_stop_watcher"):
+                    try:
+                        response = requests.post(f"{API_BASE}/ingest/watch/notes/stop", timeout=5)
+                        if response.status_code == 200:
+                            st.success("Stopped")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+        
+        st.markdown("---")
+        if st.button("Ingest all existing Obsidian notes (one-time)", type="primary", key="sidebar_ingest_all"):
+            with st.spinner("Ingesting your entire vault..."):
+                try:
+                    response = requests.post(f"{API_BASE}/ingest/watch/notes/ingest-all", timeout=300)
+                    if response.status_code == 200:
+                        result = response.json()
+                        count = result.get("count", 0)
+                        st.success(f"Done! {count} notes added.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
 # Remove Streamlit timeout limits for long-running ingestion tasks
 os.environ.setdefault("STREAMLIT_SERVER_MAX_REQUEST_SIZE", "0")
 os.environ.setdefault("STREAMLIT_SERVER_MAX_MESSAGE_SIZE", "0")
 
-# Page config - Phase 1: Single-page layout
+# Page config - Claude/Grok Design Language
 st.set_page_config(
     page_title="Powercore Mind",
-    layout="wide",
+    layout="centered",
     initial_sidebar_state="expanded"
 )
 
-# === THIS LINE IS MAGIC — DO NOT DELETE === 
-# Forces Streamlit to enable native sidebar even if we hide everything
-_ = st.sidebar  # This single line activates the native sidebar system
+# === SIDEBAR MUST BE RENDERED IMMEDIATELY AFTER set_page_config ===
+# In Streamlit v1.38+ with layout="centered", ANY st. command before sidebar kills it
+with st.sidebar:
+    # New Chat button - small pill shape
+    if st.button("🆕 New Chat", key="new_chat_sidebar", type="primary"):
+        st.session_state.chat_history = []
+        st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        st.rerun()
+    
+    st.markdown("---")
+    
+    pages = {
+        "Chat": "chat",
+        "Cognitive IDE": "cognitive_ide",
+        "Library": "library",
+        "Ingest": "ingest",
+        "Visualize": "visualize",
+        "Graph": "graph",
+        "Settings": "settings",
+        "Prompts": "prompts"
+    }
+    
+    current_page = st.session_state.get("current_page", "chat")
+    for page_name, page_key in pages.items():
+        # Highlight active page with purple accent
+        button_type = "primary" if page_key == current_page else "secondary"
+        if st.button(page_name, key=f"nav_{page_key}", use_container_width=True, type=button_type):
+            st.session_state.current_page = page_key
+            st.rerun()
+    
+    # Floating chevron button on sidebar right edge (when expanded)
+    if not st.session_state.get("sidebar_collapsed", False):
+        st.markdown("""
+        <div class="sidebar-chevron" onclick="toggleSidebarCollapse()">⟨</div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Render the rest of sidebar content (expanders, etc.)
+    render_sidebar_content()
 
+# === NOW inject global CSS and JavaScript AFTER sidebar ===
 # === HIDDEN JS ENGINE — DO NOT DELETE ===
 # All JavaScript moved here to prevent visible debug blocks
 components.html("""
@@ -113,38 +978,66 @@ components.html("""
         return false;
     };
     
-    // Set up hamburger button event listener on page load
-    document.addEventListener('DOMContentLoaded', () => {
-        // Find the custom hamburger button by its key attribute or parent
-        const hamburgerButtons = document.querySelectorAll('button[data-testid*="hamburger"]');
-        hamburgerButtons.forEach(btn => {
-            // Remove any existing listeners to avoid duplicates
-            const newBtn = btn.cloneNode(true);
-            btn.parentNode.replaceChild(newBtn, btn);
-            // Add click listener
-            newBtn.addEventListener('click', (e) => {
-                // Small delay to ensure Streamlit has processed the click
-                setTimeout(() => {
-                    window.toggleSidebar();
-                }, 100);
-            });
-        });
-    });
+    // Chevron button handlers for sidebar toggle - Enhanced with class management
+    window.toggleSidebarCollapse = function() {
+        const toggleBtn = document.querySelector('[data-testid="collapsedControl"]');
+        if (toggleBtn) {
+            document.body.classList.add('sidebar-collapsed');
+            const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+            if (sidebar) {
+                sidebar.classList.add('collapsed');
+            }
+            toggleBtn.click();
+        }
+    };
     
-    // Sync sidebar state on page load based on session state
-    // This runs after Streamlit renders to ensure sidebar state matches session state
+    window.toggleSidebarExpand = function() {
+        const toggleBtn = document.querySelector('[data-testid="collapsedControl"]');
+        if (toggleBtn) {
+            document.body.classList.remove('sidebar-collapsed');
+            const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+            if (sidebar) {
+                sidebar.classList.remove('collapsed');
+            }
+            toggleBtn.click();
+        }
+    };
+    
+    // Sync sidebar state on page load - ensure sidebar is expanded by default
     function syncSidebarState() {
-        // Check if sidebar should be open based on URL params or other indicators
-        // For now, we'll rely on initial_sidebar_state and manual toggling
-        // The hamburger button will trigger a rerun and this will sync
+        // Wait for Streamlit to render sidebar
+        setTimeout(function() {
+            const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+            if (sidebar) {
+                const isExpanded = sidebar.getAttribute('aria-expanded') === 'true';
+                // If sidebar is collapsed, expand it (respect initial_sidebar_state="expanded")
+                if (!isExpanded) {
+                    // Check for collapsed control button (visible when sidebar is collapsed)
+                    const collapsedControl = document.querySelector('[data-testid="collapsedControl"]');
+                    if (collapsedControl && collapsedControl.offsetParent !== null) {
+                        // Sidebar is collapsed - expand it
+                        collapsedControl.click();
+                    }
+                }
+            }
+        }, 300); // Give Streamlit time to render
     }
     
-    // Run sync on page load
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', syncSidebarState);
-    } else {
+    // Run sync on page load - multiple attempts to ensure it works
+    function runSync() {
         syncSidebarState();
+        // Also try after a longer delay in case Streamlit is slow
+        setTimeout(syncSidebarState, 1000);
     }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', runSync);
+    } else {
+        runSync();
+    }
+    
+    // Also sync after Streamlit reruns
+    window.addEventListener('load', runSync);
     
     // Keyboard shortcuts
     document.addEventListener('keydown', function(e) {
@@ -177,9 +1070,92 @@ components.html("""
 </script>
 """, height=0, width=0)
 
-# Phase 6 & 7: Custom CSS for header, messages, and mobile responsiveness
+# Initialize session state - MUST be after sidebar
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+# Sidebar state - default to open/expanded
+if "sidebar_open" not in st.session_state:
+    st.session_state.sidebar_open = True   # ← This single line reveals v2.0 forever
+if "sidebar_collapsed" not in st.session_state:
+    st.session_state.sidebar_collapsed = False
+if "sidebar_width" not in st.session_state:
+    st.session_state.sidebar_width = 280
+
+# Ensure sidebar is expanded on initial load
+# Streamlit's initial_sidebar_state="expanded" handles this, but we sync our state
+if st.session_state.sidebar_open and not st.session_state.sidebar_collapsed:
+    # Sidebar should be open - this is handled by initial_sidebar_state
+    pass
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "chat"
+if "project_tag" not in st.session_state:
+    st.session_state.project_tag = ""
+if "current_focus" not in st.session_state:
+    st.session_state.current_focus = "General"
+if "raw_mode" not in st.session_state:
+    st.session_state.raw_mode = False
+if "rag_threshold" not in st.session_state:
+    st.session_state.rag_threshold = 0.25
+if "top_k" not in st.session_state:
+    st.session_state.top_k = rag_utils.DEFAULT_K
+if "show_context" not in st.session_state:
+    st.session_state.show_context = False
+
+# Initialize v2.0 state variables
+if "related_notes" not in st.session_state:
+    st.session_state.related_notes = []
+if "current_thread" not in st.session_state:
+    st.session_state.current_thread = None
+if "memory_streams" not in st.session_state:
+    st.session_state.memory_streams = []
+if "rag_context" not in st.session_state:
+    st.session_state.rag_context = []
+if "settings" not in st.session_state:
+    st.session_state.settings = {
+        'top_k': st.session_state.get('top_k', 3),
+        'relevance_threshold': st.session_state.get('rag_threshold', 0.25),
+        'auto_crystallize': False,
+        'uncensored_mode': st.session_state.get('raw_mode', False),
+        'auto_ingest_obsidian': st.session_state.get('auto_ingest_obsidian', True),
+        'manual_rag_tuning': False
+    }
+
+# Initialize ChatLogger
+if "chat_logger" not in st.session_state:
+    try:
+        st.session_state.chat_logger = ChatLogger()
+    except Exception as e:
+        logger.warning(f"Failed to initialize ChatLogger: {e}")
+        st.session_state.chat_logger = None
+
+# Claude/Grok Design Language CSS - Consolidated and moved after sidebar
 st.markdown("""
 <style>
+    /* FORCE SIDEBAR TO EXIST */
+    section[data-testid="stSidebar"] {
+        min-width: 280px !important;
+        width: 280px !important;
+        flex-shrink: 0 !important;
+        transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    }
+    
+    /* Main container - centered with max-width 1200px */
+    .main-container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 0 100px;
+    }
+    
+    /* Reduce top void - tighter spacing */
+    .main .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 1rem !important;
+    }
+    
     /* Fixed header bar */
     .fixed-header {
         position: fixed;
@@ -203,28 +1179,126 @@ st.markdown("""
         flex-direction: column;
     }
     
-    /* Chat container - scrollable */
+    /* Chat container - scrollable, centered */
     .chat-container {
         flex: 1;
         overflow-y: auto;
         padding: 20px;
-        padding-bottom: 100px; /* Space for fixed input */
+        padding-bottom: 100px;
+        max-width: 1200px;
+        margin: 0 auto;
+        width: 100%;
     }
     
-    /* Message bubbles - Phase 2 styling */
+    /* Chevron buttons for sidebar control - Purple obelisk style */
+    .sidebar-chevron {
+        position: fixed;
+        top: 50%;
+        right: 8px;
+        transform: translateY(-50%);
+        background: rgba(138, 43, 226, 0.9);
+        color: white;
+        width: 32px;
+        height: 64px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+        cursor: pointer;
+        z-index: 9999;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+    
+    .main-chevron {
+        position: fixed;
+        left: 16px;
+        top: 50%;
+        transform: translateY(-50%);
+        background: rgba(138, 43, 226, 0.9);
+        color: white;
+        width: 32px;
+        height: 64px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+        cursor: pointer;
+        z-index: 9999;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+    
+    /* Visual density adjustments - tighter spacing throughout */
+    .main-container .stButton > button {
+        padding: 6px 16px !important;
+        font-size: 13px !important;
+        border-radius: 6px !important;
+        min-height: 36px !important;
+    }
+    
+    .main-container input[type="text"],
+    .main-container textarea {
+        padding: 8px 12px !important;
+        font-size: 14px !important;
+        border-radius: 8px !important;
+    }
+    
+    .main-container .stSelectbox > div > div {
+        padding: 6px 12px !important;
+        font-size: 13px !important;
+    }
+    
+    /* Cards and panels - inset premium feel */
+    .main-container [data-testid="stCard"] {
+        padding: 16px !important;
+        border-radius: 12px !important;
+        margin: 8px 0 !important;
+    }
+    
+    /* Reduce spacing in columns */
+    .main-container [data-testid="column"] {
+        padding: 0 8px !important;
+    }
+    
+    /* Tighter headings */
+    .main-container h1 {
+        font-size: 2rem !important;
+        margin: 1rem 0 0.5rem 0 !important;
+    }
+    
+    .main-container h2 {
+        font-size: 1.5rem !important;
+        margin: 0.75rem 0 0.4rem 0 !important;
+    }
+    
+    .main-container h3 {
+        font-size: 1.25rem !important;
+        margin: 0.5rem 0 0.3rem 0 !important;
+    }
+    
+    /* Ensure inputs respect side padding */
+    .main-container .stTextInput,
+    .main-container .stTextArea,
+    .main-container .stSelectbox {
+        max-width: 100% !important;
+    }
+    
+    /* Message bubbles - Denser Claude/Grok style */
     .message-bubble {
-        margin: 7px 0;
-        padding: 12px 16px;
+        margin: 4px 0;
+        padding: 10px 14px;
         border-radius: 12px;
         max-width: 80%;
         position: relative;
         word-wrap: break-word;
+        line-height: 1.5;
     }
     
-    /* Message divider - Grok style */
+    /* Message divider - tighter spacing */
     .message-divider {
         border-top: 1px solid #2d2d2d;
-        margin: 8px 0;
+        margin: 4px 0;
     }
     
     .message-user {
@@ -417,14 +1491,64 @@ st.markdown("""
         font-size: 15px !important;
     }
     
-    /* Sidebar background gradient */
+    /* Sidebar - Denser Claude/Grok style */
     section[data-testid="stSidebar"] {
         background: linear-gradient(180deg, #0a0a0a 0%, #111 100%) !important;
     }
     
-    /* Sidebar content area */
+    /* Sidebar content area - tighter spacing */
     section[data-testid="stSidebar"] > div {
         background: transparent !important;
+        padding: 12px 8px !important;
+    }
+    
+    /* Sidebar buttons - smaller, denser */
+    section[data-testid="stSidebar"] button {
+        padding: 6px 12px !important;
+        margin: 2px 0 !important;
+        font-size: 13px !important;
+        border-radius: 6px !important;
+        min-height: 32px !important;
+        line-height: 1.4 !important;
+    }
+    
+    /* Active sidebar item highlight - purple accent */
+    section[data-testid="stSidebar"] button[kind="secondary"]:has-text,
+    section[data-testid="stSidebar"] button:active {
+        background: rgba(124, 58, 237, 0.2) !important;
+        border-left: 2px solid #7c3aed !important;
+    }
+    
+    /* New Chat button - small pill shape */
+    section[data-testid="stSidebar"] button[kind="primary"] {
+        background: rgba(124, 58, 237, 0.3) !important;
+        border: 1px solid rgba(124, 58, 237, 0.5) !important;
+        border-radius: 20px !important;
+        padding: 6px 16px !important;
+        font-size: 12px !important;
+        width: auto !important;
+        max-width: fit-content !important;
+        margin: 8px auto !important;
+    }
+    
+    /* Sidebar text - smaller, crisper */
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 {
+        font-size: 14px !important;
+        margin: 8px 0 4px 0 !important;
+        padding: 0 !important;
+    }
+    
+    /* Sidebar expanders - tighter */
+    section[data-testid="stSidebar"] [data-testid="stExpander"] {
+        margin: 4px 0 !important;
+    }
+    
+    /* Sidebar captions - smaller */
+    section[data-testid="stSidebar"] .stCaption {
+        font-size: 11px !important;
+        margin: 2px 0 !important;
     }
     
     /* Relevance badge styles */
@@ -504,66 +1628,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Smooth sidebar animation
-st.markdown("""
-<style>
-div[data-testid='stSidebar'] {
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# Initialize session state
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
-if "conversation_id" not in st.session_state:
-    st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-if "sidebar_open" not in st.session_state:
-    st.session_state.sidebar_open = True   # ← This single line reveals v2.0 forever
-if "current_page" not in st.session_state:
-    st.session_state.current_page = "chat"
-if "project_tag" not in st.session_state:
-    st.session_state.project_tag = ""
-if "current_focus" not in st.session_state:
-    st.session_state.current_focus = "General"
-if "raw_mode" not in st.session_state:
-    st.session_state.raw_mode = False
-if "rag_threshold" not in st.session_state:
-    st.session_state.rag_threshold = 0.25
-if "top_k" not in st.session_state:
-    st.session_state.top_k = rag_utils.DEFAULT_K
-if "show_context" not in st.session_state:
-    st.session_state.show_context = False
-
-# Initialize v2.0 state variables
-if "related_notes" not in st.session_state:
-    st.session_state.related_notes = []
-if "current_thread" not in st.session_state:
-    st.session_state.current_thread = None
-if "memory_streams" not in st.session_state:
-    st.session_state.memory_streams = []
-if "rag_context" not in st.session_state:
-    st.session_state.rag_context = []
-if "settings" not in st.session_state:
-    st.session_state.settings = {
-        'top_k': st.session_state.get('top_k', 3),
-        'relevance_threshold': st.session_state.get('rag_threshold', 0.25),
-        'auto_crystallize': False,
-        'uncensored_mode': st.session_state.get('raw_mode', False),
-        'auto_ingest_obsidian': st.session_state.get('auto_ingest_obsidian', True),
-        'manual_rag_tuning': False
-    }
-
-# Initialize ChatLogger
-if "chat_logger" not in st.session_state:
-    try:
-        st.session_state.chat_logger = ChatLogger()
-    except Exception as e:
-        logger.warning(f"Failed to initialize ChatLogger: {e}")
-        st.session_state.chat_logger = None
-
 # Check backend availability
 try:
     backend_available = check_backend_available()
@@ -593,127 +1657,13 @@ def get_ollama_status_safe():
         return {"available": False, "error": str(e)[:100]}
 
 
-# === ATOMIC STATE UPDATE FUNCTION ===
-def update_conversation_state(new_message: Optional[Dict] = None):
-    """Atomic state update after message - prevents race conditions"""
-    # Store message if provided
-    if new_message:
-        st.session_state.chat_history.append(new_message)
-    
-    # Batch compute related data ONCE
-    if st.session_state.chat_history:
-        context = " ".join([
-            m.get('question', m.get('content', '')) 
-            for m in st.session_state.chat_history[-3:]
-        ])
-        
-        # Update all state together atomically
-        st.session_state.update({
-            'related_notes': safe_execute(
-                lambda: get_related_notes(context, top_k=5),
-                fallback_value=[],
-                error_message="Could not update related notes"
-            ),
-            'current_thread': {
-                'id': st.session_state.conversation_id,
-                'title': (
-                    st.session_state.chat_history[0].get('question', 'New Thread')[:50]
-                    if st.session_state.chat_history
-                    else 'New Thread'
-                ),
-                'message_count': len(st.session_state.chat_history)
-            },
-            'rag_context': safe_execute(
-                lambda: get_rag_context(
-                    st.session_state.chat_history[-1].get('question', ''),
-                    k=st.session_state.settings.get('top_k', 8),
-                    settings=st.session_state.settings
-                ) if st.session_state.chat_history else [],
-                fallback_value=[],
-                error_message="Could not update RAG context"
-            )
-        })
-        
-        # Update memory streams (less frequently - every 5 messages)
-        if len(st.session_state.chat_history) % 5 == 0:
-            st.session_state.memory_streams = safe_execute(
-                lambda: get_memory_streams(),
-                fallback_value=[],
-                error_message="Could not update memory streams"
-            )
-        
-        # Store conversation to persistent memory store
-        safe_execute(
-            lambda: store_conversation(
-                conversation_id=st.session_state.conversation_id,
-                messages=st.session_state.chat_history,
-                title=st.session_state.current_thread.get('title'),
-                tags=st.session_state.get('current_tags', []),
-                metadata={
-                    'related_notes': [n['source'] for n in st.session_state.get('related_notes', [])]
-                }
-            ),
-            fallback_value=False,
-            error_message="Could not store conversation"
-        )
-
-
-# === LOAD CONVERSATION FUNCTION ===
-def load_conversation(conversation_id: str):
-    """Restore a previous conversation from memory store"""
-    try:
-        conversation = load_conversation_by_id(conversation_id)
-        if conversation:
-            st.session_state.conversation_id = conversation_id
-            st.session_state.chat_history = conversation.get('messages', [])
-            st.session_state.current_thread = {
-                'id': conversation_id,
-                'title': conversation.get('title', 'Restored Thread'),
-                'message_count': len(conversation.get('messages', []))
-            }
-            update_conversation_state(None)
-            st.success(f"✅ Loaded: {conversation.get('title', 'Conversation')}")
-            st.rerun()
-        else:
-            st.error("Conversation not found")
-    except Exception as e:
-        st.error(f"Failed to load conversation: {e}")
-
 # Phase 1 & 6: Fixed Header Bar
 def render_header():
     """Render fixed top header bar with logo, controls, and menu."""
-    # Hamburger in top-left, reorder columns (removed col5 for New Chat button)
-    col1, col2, col3, col4 = st.columns([1, 2, 2, 2])
+    # Removed hamburger - using chevron buttons instead
+    col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
     
     with col1:
-        # Custom beautiful hamburger button
-        hamburger_clicked = st.button("☰", key="hamburger", use_container_width=True, help="Toggle sidebar")
-        if hamburger_clicked:
-            # Toggle session state
-            current_state = st.session_state.get("sidebar_open", True)
-            st.session_state.sidebar_open = not current_state
-            # Use JavaScript to click Streamlit's native sidebar toggle button
-            # The JavaScript will run after the rerun completes
-            # NOTE: Removed key= parameter - deprecated in Streamlit ≥1.38
-            components.html("""
-            <script>
-            (function() {
-                // Wait for Streamlit to finish rendering, then toggle sidebar
-                setTimeout(function() {
-                    if (window.toggleSidebar) {
-                        window.toggleSidebar();
-                    } else {
-                        // Fallback: direct toggle
-                        const toggleBtn = document.querySelector('[data-testid="collapsedControl"]');
-                        if (toggleBtn) toggleBtn.click();
-                    }
-                }, 100);
-            })();
-            </script>
-            """, height=0, width=0)
-            st.rerun()
-    
-    with col2:
         # Logo - smaller and left-aligned (Issue 5)
         st.markdown('<div class="header-logo">🧠 Powercore Mind</div>', unsafe_allow_html=True)
     
@@ -840,391 +1790,6 @@ metadata:
                 st.rerun()
     
 
-# Phase 1: Collapsible Sidebar
-def render_sidebar():
-    """Render collapsible sidebar with navigation links."""
-    # Always render sidebar (for Streamlit's native system), but conditionally show content
-    with st.sidebar:
-        if st.session_state.get("sidebar_open", False):
-            st.markdown("## Navigation")
-            
-            # Close button
-            if st.button("Close ×", key="close_sidebar"):
-                st.session_state.sidebar_open = False
-                st.rerun()
-            
-            # New Chat button - moved from header
-            if st.button("🆕 New Chat", key="new_chat_sidebar", use_container_width=True, type="primary"):
-                st.session_state.chat_history = []
-                st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-                st.rerun()
-            
-            st.markdown("---")
-            
-            pages = {
-                "Chat": "chat",
-                "Library": "library",
-                "Ingest": "ingest",
-                "Visualize": "visualize",
-                "Graph": "graph",
-                "Settings": "settings",
-                "Prompts": "prompts"
-            }
-            
-            for page_name, page_key in pages.items():
-                if st.button(page_name, key=f"nav_{page_key}", use_container_width=True):
-                    st.session_state.current_page = page_key
-                    st.rerun()
-            
-            st.markdown("---")
-            
-            # === V2.0 NEW EXPANDERS ===
-            
-            # 0. Attention Flow Visualization
-            render_attention_map()
-            
-            # 1. Active Context Expander
-            with st.expander("🎯 Active Context", expanded=True):
-                if st.session_state.current_thread:
-                    st.markdown(f"""
-                    <div style="background: rgba(124, 58, 237, 0.15); border-left: 3px solid #7c3aed; padding: 12px; border-radius: 8px; margin-bottom: 12px;">
-                        <strong>{st.session_state.current_thread.get('title', 'Untitled Thread')}</strong><br>
-                        <small style="color: rgba(255,255,255,0.5);">
-                            {st.session_state.current_thread.get('message_count', 0)} messages
-                        </small>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.caption("No active thread. Start a new thought!")
-                
-                # Related Obsidian notes
-                related = safe_execute(
-                    lambda: get_related_notes(
-                        " ".join([
-                            m.get('question', m.get('content', '')) 
-                            for m in st.session_state.chat_history[-3:]
-                        ])
-                        if st.session_state.chat_history else "",
-                        top_k=5
-                    ),
-                    fallback_value=[],
-                    error_message="Could not load related notes"
-                )
-                
-                if related:
-                    st.caption("🔗 Connected Notes")
-                    for note in related[:3]:
-                        score_class = "relevance-high" if note['score'] >= 0.7 else ("relevance-medium" if note['score'] >= 0.4 else "relevance-low")
-                        
-                        with st.expander(f"📄 {note['title']} ({note['score']:.0%})", expanded=False):
-                            # Show preview
-                            note_content = safe_execute(
-                                lambda: inject_note_context(note['source']),
-                                fallback_value=None,
-                                error_message="Could not load note"
-                            )
-                            
-                            if note_content:
-                                preview = note_content[:300] + "..." if len(note_content) > 300 else note_content
-                                st.caption("Preview:")
-                                st.markdown(preview)
-                                
-                                col1, col2, col3 = st.columns(3)
-                                
-                                with col1:
-                                    if st.button("💉 Inject", key=f"inject_{note['id']}", use_container_width=True):
-                                        # Add to conversation context
-                                        injected_msg = {
-                                            'role': 'system',
-                                            'content': f"[Context injected from {note['title']}]\n\n{note_content}",
-                                            'metadata': {'type': 'injected_context', 'source': note['source']}
-                                        }
-                                        # Store in session state for next message
-                                        if 'injected_contexts' not in st.session_state:
-                                            st.session_state.injected_contexts = []
-                                        st.session_state.injected_contexts.append(injected_msg)
-                                        st.success(f"✓ Injected {note['title']}")
-                                        st.rerun()
-                                
-                                with col2:
-                                    if st.button("🔗 Open", key=f"open_{note['id']}", use_container_width=True):
-                                        open_in_obsidian(note['source'])
-                                        st.info("Opening in Obsidian...")
-                                
-                                with col3:
-                                    if st.button("📋 Copy", key=f"copy_{note['id']}", use_container_width=True):
-                                        st.code(note_content, language="markdown")
-                            else:
-                                st.caption("Note content not available")
-            
-            # 2. Knowledge Base Expander
-            with st.expander("📚 Knowledge Base", expanded=False):
-                tab1, tab2, tab3 = st.tabs(["Vault", "Documents", "Graph"])
-                
-                with tab1:
-                    st.caption("Obsidian Vault Browser")
-                    vault_path = Path("./knowledge/notes")
-                    if vault_path.exists():
-                        folders = safe_execute(
-                            lambda: [d.name for d in vault_path.iterdir() if d.is_dir() and not d.name.startswith('.')],
-                            fallback_value=[],
-                            error_message="Could not list vault folders"
-                        )
-                        for folder in folders[:5]:
-                            if st.checkbox(f"📁 {folder}", value=False):
-                                st.markdown(f"- 📄 {folder} notes")
-                    else:
-                        st.caption("Vault not found")
-                
-                with tab2:
-                    st.caption("Ingested Documents")
-                    docs_result = safe_execute(
-                        lambda: list_documents(),
-                        fallback_value={"items": [], "total": 0},
-                        error_message="Could not load documents"
-                    )
-                    # Handle both dict response and list response
-                    if isinstance(docs_result, dict):
-                        docs_list = docs_result.get("items", [])
-                    elif isinstance(docs_result, list):
-                        docs_list = docs_result
-                    else:
-                        docs_list = []
-                    
-                    if docs_list:
-                        st.markdown("**Recent:**")
-                        for doc in docs_list[:5]:
-                            # Handle both dict and string formats
-                            if isinstance(doc, dict):
-                                doc_name = doc.get('source_path', doc.get('name', 'Unknown'))
-                            else:
-                                doc_name = str(doc)
-                            st.markdown(f"- {doc_name}")
-                    else:
-                        st.caption("No documents ingested yet")
-                    
-                    if st.button("➕ Ingest New Document", use_container_width=True):
-                        st.info("Use the paperclip icon in the chat input to ingest files")
-                
-                with tab3:
-                    st.markdown("""
-                    <div style="background: rgba(15, 15, 15, 0.8); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 12px; margin: 8px 0; min-height: 120px; display: flex; align-items: center; justify-content: center; color: rgba(255, 255, 255, 0.4); font-size: 0.85rem;">
-                        🌐 Graph View<br>
-                        <small>Click to expand full graph</small>
-                    </div>
-                    """, unsafe_allow_html=True)
-            
-            # 2.5. Conversation Branching
-            render_branch_points()
-            
-            # 3. Memory Streams Expander
-            with st.expander("💭 Memory Streams", expanded=False):
-                streams = safe_execute(
-                    lambda: get_memory_streams(),
-                    fallback_value=[],
-                    error_message="Could not load memory streams"
-                )
-                
-                # Group by category
-                today = [s for s in streams if s.get('category') == 'today']
-                week = [s for s in streams if s.get('category') == 'week']
-                
-                if today:
-                    st.caption("Today")
-                    for stream in today:
-                        st.markdown(f"""
-                        <div style="padding: 8px 12px; border-radius: 8px; margin: 4px 0; cursor: pointer; background: rgba(30, 30, 30, 0.4); border-left: 2px solid #00ff88;">
-                            <strong>{stream['title']}</strong><br>
-                            <small style="color: rgba(255,255,255,0.5);">
-                                {stream.get('message_count', 0)} messages
-                            </small>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        if st.button("Load", key=f"load_{stream['id']}", use_container_width=True):
-                            load_conversation(stream['id'])
-                
-                if week:
-                    st.caption("This Week")
-                    for stream in week:
-                        st.markdown(f"""
-                        <div style="padding: 8px 12px; border-radius: 8px; margin: 4px 0; cursor: pointer; background: rgba(30, 30, 30, 0.4);">
-                            <strong>{stream['title']}</strong><br>
-                            <small style="color: rgba(255,255,255,0.5);">
-                                {stream.get('message_count', 0)} messages
-                            </small>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        if st.button("Load", key=f"load_{stream['id']}", use_container_width=True):
-                            load_conversation(stream['id'])
-            
-            # 4. System Settings Expander (enhanced)
-            with st.expander("⚙️ System", expanded=False):
-                st.caption("Interaction Preferences")
-                
-                auto_crystallize = st.toggle(
-                    "Auto-Crystallize Insights",
-                    value=st.session_state.settings.get('auto_crystallize', False),
-                    key="auto_crystallize_toggle",
-                    help="Automatically save valuable insights to Obsidian"
-                )
-                st.session_state.settings['auto_crystallize'] = auto_crystallize
-                
-                uncensored_mode = st.toggle(
-                    "Uncensored Raw Mode",
-                    value=st.session_state.settings.get('uncensored_mode', False),
-                    key="uncensored_mode_toggle",
-                    help="Disable content filters (use responsibly)"
-                )
-                st.session_state.settings['uncensored_mode'] = uncensored_mode
-                st.session_state.raw_mode = uncensored_mode
-                
-                # Advanced RAG tuning
-                st.markdown("---")
-                manual_tuning = st.checkbox(
-                    "Manual RAG Tuning",
-                    value=st.session_state.settings.get('manual_rag_tuning', False),
-                    help="Override automatic RAG parameter optimization"
-                )
-                st.session_state.settings['manual_rag_tuning'] = manual_tuning
-                
-                if manual_tuning:
-                    st.caption("⚠️ System auto-tunes these. Override only if needed.")
-                    top_k_slider = st.slider(
-                        "Context Chunks (Top-K)",
-                        min_value=1,
-                        max_value=20,
-                        value=st.session_state.settings.get('top_k', 8),
-                        key="top_k_slider",
-                        help="Number of context chunks to retrieve"
-                    )
-                    st.session_state.settings['top_k'] = top_k_slider
-                    st.session_state.top_k = top_k_slider
-                    
-                    relevance_slider = st.slider(
-                        "Relevance Threshold",
-                        min_value=0.0,
-                        max_value=1.0,
-                        value=st.session_state.settings.get('relevance_threshold', 0.25),
-                        step=0.05,
-                        key="relevance_slider",
-                        help="Minimum similarity score for retrieval"
-                    )
-                    st.session_state.settings['relevance_threshold'] = relevance_slider
-                    st.session_state.rag_threshold = relevance_slider
-            
-            # 5. Prompts Library Expander
-            with st.expander("📝 Prompts Library", expanded=False):
-                st.caption("Quick Templates")
-                # TODO: Query prompts from API if available
-                prompts = [
-                    "Analyze and synthesize...",
-                    "Extract key insights from...",
-                    "Compare and contrast...",
-                    "Crystallize this conversation"
-                ]
-                
-                for prompt in prompts:
-                    if st.button(prompt, key=f"prompt_{prompt[:10]}", use_container_width=True):
-                        st.session_state.prompt_template = prompt
-                        st.rerun()
-                
-                st.markdown("---")
-                
-                # Semantic Prompt Discovery
-                suggest_prompts_for_context()
-                
-                st.markdown("---")
-                
-                # Prompt Chain Executor
-                render_prompt_chain_executor()
-            
-            # 6. Session Context & Obsidian Sync (integrated into System Settings)
-            with st.expander("🔧 Session & Sync", expanded=False):
-                # Session Context
-                st.caption("Current Focus")
-                current_focus = st.selectbox(
-                    "What are you working on?",
-                    ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"],
-                    index=["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"].index(
-                        st.session_state.current_focus
-                    ) if st.session_state.current_focus in ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"] else 0,
-                    key="sidebar_current_focus",
-                    help="What are you working on right now?"
-                )
-                st.session_state.current_focus = current_focus
-                
-                st.markdown("---")
-                
-                # Basic Settings
-                st.caption("Display Preferences")
-                show_context = st.checkbox("Show retrieved context", value=st.session_state.show_context, key="sidebar_show_context")
-                st.session_state.show_context = show_context
-                
-                st.markdown("---")
-                
-                # Obsidian Sync
-                st.caption("Obsidian Integration")
-                auto_ingest_obsidian = st.checkbox(
-                    "Auto-ingest Obsidian notes",
-                    value=st.session_state.get("auto_ingest_obsidian", True),
-                    key="sidebar_auto_ingest",
-                    help="Automatically ingest new/modified notes from knowledge/notes/ folder"
-                )
-                st.session_state.auto_ingest_obsidian = auto_ingest_obsidian
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    try:
-                        watcher_status_response = requests.get(f"{API_BASE}/ingest/watch/status", timeout=2)
-                        if watcher_status_response.status_code == 200:
-                            watcher_status = watcher_status_response.json().get("notes_watcher", "unknown")
-                            if watcher_status == "running":
-                                st.success("✅ Running")
-                            else:
-                                st.warning(f"⚠️ {watcher_status}")
-                        else:
-                            st.info("Unknown")
-                    except Exception:
-                        st.info("Unknown")
-                
-                with col2:
-                    col_start, col_stop = st.columns(2)
-                    with col_start:
-                        if st.button("▶", key="sidebar_start_watcher"):
-                            try:
-                                response = requests.post(f"{API_BASE}/ingest/watch/notes/start", timeout=5)
-                                if response.status_code == 200:
-                                    st.success("Started")
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"Error: {e}")
-                    with col_stop:
-                        if st.button("⏹", key="sidebar_stop_watcher"):
-                            try:
-                                response = requests.post(f"{API_BASE}/ingest/watch/notes/stop", timeout=5)
-                                if response.status_code == 200:
-                                    st.success("Stopped")
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"Error: {e}")
-                
-                st.markdown("---")
-                if st.button("Ingest all existing Obsidian notes (one-time)", type="primary", key="sidebar_ingest_all"):
-                    with st.spinner("Ingesting your entire vault..."):
-                        try:
-                            response = requests.post(f"{API_BASE}/ingest/watch/notes/ingest-all", timeout=300)
-                            if response.status_code == 200:
-                                result = response.json()
-                                count = result.get("count", 0)
-                                st.success(f"Done! {count} notes added.")
-                                st.rerun()
-                        except Exception as e:
-                            st.error(f"Error: {e}")
-        else:
-            # Sidebar is closed - show minimal content or nothing
-            st.markdown("")
-            st.caption("Click ☰ to open sidebar")
-        
 # Issue 3: Render floating action icons for messages
 def render_message_actions(message_id: str, entry: dict, idx: int):
     """Render 3 floating action icons (Copy, Crystallize, Canvas) in bottom-right."""
@@ -1460,387 +2025,6 @@ def render_thinking_animation():
     </div>
     """
 
-# === ATTENTION FLOW VISUALIZATION ===
-def render_attention_map():
-    """Visualize which notes are being used most in the current session"""
-    try:
-        # Track note access in session state
-        if 'note_access_tracking' not in st.session_state:
-            st.session_state.note_access_tracking = {}
-        
-        # Update tracking from current RAG context and related notes
-        if st.session_state.get('rag_context'):
-            for chunk in st.session_state.rag_context:
-                source = chunk.get('source', 'unknown')
-                if source != 'unknown':
-                    if source not in st.session_state.note_access_tracking:
-                        st.session_state.note_access_tracking[source] = {
-                            'count': 0,
-                            'last_accessed': None
-                        }
-                    st.session_state.note_access_tracking[source]['count'] += 1
-                    st.session_state.note_access_tracking[source]['last_accessed'] = time.time()
-        
-        if st.session_state.get('related_notes'):
-            for note in st.session_state.related_notes:
-                source = note.get('source', 'unknown')
-                if source != 'unknown':
-                    if source not in st.session_state.note_access_tracking:
-                        st.session_state.note_access_tracking[source] = {
-                            'count': 0,
-                            'last_accessed': None
-                        }
-                    st.session_state.note_access_tracking[source]['count'] += 1
-                    st.session_state.note_access_tracking[source]['last_accessed'] = time.time()
-        
-        # Show visualization if we have tracked notes
-        if st.session_state.note_access_tracking:
-            with st.expander("🧠 Knowledge Attention Map", expanded=False):
-                # Sort by access count
-                sorted_notes = sorted(
-                    st.session_state.note_access_tracking.items(),
-                    key=lambda x: x[1]['count'],
-                    reverse=True
-                )[:10]  # Top 10
-                
-                if sorted_notes:
-                    try:
-                        import plotly.graph_objects as go
-                        
-                        notes = [Path(n[0]).stem for n in sorted_notes]
-                        counts = [n[1]['count'] for n in sorted_notes]
-                        
-                        fig = go.Figure(data=[go.Bar(
-                            x=notes,
-                            y=counts,
-                            marker=dict(
-                                color=counts,
-                                colorscale='Viridis',
-                                showscale=True
-                            )
-                        )])
-                        
-                        fig.update_layout(
-                            title="Most Referenced Notes This Session",
-                            xaxis_title="Note",
-                            yaxis_title="Times Referenced",
-                            height=300,
-                            template='plotly_dark'
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                    except ImportError:
-                        # Fallback to simple text list if Plotly not available
-                        st.caption("Most Referenced Notes:")
-                        for note_path, stats in sorted_notes[:5]:
-                            note_name = Path(note_path).stem
-                            st.markdown(f"- **{note_name}**: {stats['count']} references")
-                    except Exception as e:
-                        logger.error(f"Error rendering attention map: {e}")
-                        st.caption("Could not render attention map")
-    
-    except Exception as e:
-        logger.error(f"Error in render_attention_map: {e}")
-        # Fail silently
-
-# === CONVERSATION BRANCHING ===
-def render_branch_points():
-    """Allow branching at any message point"""
-    if not st.session_state.chat_history:
-        return
-    
-    with st.expander("🔀 Conversation Branches", expanded=False):
-        st.caption("Fork conversation at any point")
-        
-        # Show last 5 messages as branch points
-        for idx in range(len(st.session_state.chat_history) - 1, max(-1, len(st.session_state.chat_history) - 6), -1):
-            entry = st.session_state.chat_history[idx]
-            if entry.get('question'):
-                question_preview = entry['question'][:40] + "..." if len(entry['question']) > 40 else entry['question']
-                
-                if st.button(
-                    f"Branch from msg {idx}",
-                    key=f"branch_{idx}",
-                    use_container_width=True,
-                    help=question_preview
-                ):
-                    create_branch(idx)
-
-def create_branch(branch_point: int):
-    """Create a new conversation branch from a specific message point"""
-    try:
-        if branch_point < 0 or branch_point >= len(st.session_state.chat_history):
-            st.error("Invalid branch point")
-            return
-        
-        # Create new conversation from branch point
-        new_thread_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-        
-        # Copy messages up to branch point
-        branched_messages = st.session_state.chat_history[:branch_point + 1].copy()
-        
-        # Save as new thread
-        safe_execute(
-            lambda: store_conversation(
-                conversation_id=new_thread_id,
-                messages=branched_messages,
-                title=f"Branch from: {branched_messages[0].get('question', 'Untitled')[:50]}",
-                tags=['branch'],
-                metadata={
-                    'parent_thread': st.session_state.conversation_id,
-                    'branch_point': branch_point,
-                    'original_thread': st.session_state.conversation_id
-                }
-            ),
-            fallback_value=False,
-            error_message="Could not create branch"
-        )
-        
-        # Switch to new thread
-        st.session_state.conversation_id = new_thread_id
-        st.session_state.chat_history = branched_messages
-        
-        # Update thread info
-        st.session_state.current_thread = {
-            'id': new_thread_id,
-            'title': f"Branch from: {branched_messages[0].get('question', 'Untitled')[:50]}",
-            'message_count': len(branched_messages)
-        }
-        
-        st.success(f"✓ Branched conversation at message {branch_point}")
-        st.rerun()
-    
-    except Exception as e:
-        logger.error(f"Error creating branch: {e}")
-        st.error(f"Failed to create branch: {e}")
-
-# === SEMANTIC PROMPT DISCOVERY ===
-def suggest_prompts_for_context():
-    """AI-powered prompt suggestions based on conversation context"""
-    try:
-        if not st.session_state.chat_history:
-            return
-        
-        # Get recent conversation context
-        recent_messages = " ".join([
-            m.get('question', m.get('content', '')) 
-            for m in st.session_state.chat_history[-3:]
-        ])
-        
-        if not recent_messages:
-            return
-        
-        # Embed conversation context
-        from src.rag_utils import embed_texts
-        import numpy as np
-        
-        conv_embedding = embed_texts([recent_messages])[0]
-        
-        # Define prompt library with descriptions
-        prompt_library = [
-            {
-                'name': 'Analyze and synthesize',
-                'description': 'Break down complex topics and synthesize insights',
-                'text': 'Analyze and synthesize the key points from the context, identifying patterns and connections.'
-            },
-            {
-                'name': 'Extract key insights',
-                'description': 'Pull out the most important takeaways',
-                'text': 'Extract the key insights and actionable items from the context.'
-            },
-            {
-                'name': 'Compare and contrast',
-                'description': 'Find similarities and differences',
-                'text': 'Compare and contrast the different perspectives or approaches mentioned in the context.'
-            },
-            {
-                'name': 'Crystallize conversation',
-                'description': 'Save valuable insights to Obsidian',
-                'text': 'Crystallize the most valuable insights from this conversation into a structured note.'
-            },
-            {
-                'name': 'Critical path analysis',
-                'description': 'Find highest-leverage actions',
-                'text': 'Identify the critical path and highest-leverage actions from the context.'
-            },
-            {
-                'name': 'Generate questions',
-                'description': 'Create probing questions to explore deeper',
-                'text': 'Generate thoughtful questions that would help explore the context more deeply.'
-            }
-        ]
-        
-        # Embed all prompts
-        prompt_texts = [p['text'] for p in prompt_library]
-        prompt_embeddings = embed_texts(prompt_texts)
-        
-        # Calculate cosine similarities
-        conv_vec = np.array(conv_embedding)
-        similarities = []
-        
-        for idx, prompt_vec in enumerate(prompt_embeddings):
-            prompt_array = np.array(prompt_vec)
-            # Cosine similarity
-            dot_product = np.dot(conv_vec, prompt_array)
-            norm_conv = np.linalg.norm(conv_vec)
-            norm_prompt = np.linalg.norm(prompt_array)
-            
-            if norm_conv > 0 and norm_prompt > 0:
-                similarity = dot_product / (norm_conv * norm_prompt)
-            else:
-                similarity = 0.0
-            
-            similarities.append((prompt_library[idx], similarity))
-        
-        # Sort by similarity and get top 3
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        top_prompts = similarities[:3]
-        
-        # Show suggestions if relevance > 0.6
-        if top_prompts and top_prompts[0][1] > 0.6:
-            st.caption("💡 Suggested Prompts")
-            for prompt_data, score in top_prompts:
-                if score > 0.6:
-                    if st.button(
-                        f"▶ {prompt_data['name']} ({score:.0%})",
-                        key=f"suggest_{prompt_data['name']}",
-                        use_container_width=True,
-                        help=prompt_data['description']
-                    ):
-                        # Execute the suggested prompt
-                        st.session_state.prompt_template = prompt_data['text']
-                        st.rerun()
-    
-    except Exception as e:
-        logger.error(f"Error in semantic prompt discovery: {e}")
-        # Fail silently - don't show error to user
-
-# === PROMPT CHAIN EXECUTOR ===
-def render_prompt_chain_executor():
-    """UI component for executing prompt chains"""
-    try:
-        from src.app.utils.prompt_chains import PromptChain, execute_chain
-        
-        chain_executor = PromptChain()
-        
-        # List available chains
-        chains = chain_executor.list_chains()
-        
-        if not chains:
-            st.caption("No chains found. Create chains in prompts/chains/")
-            return
-        
-        st.caption("⛓️ Prompt Chains")
-        
-        # Select chain
-        selected_chain = st.selectbox(
-            "Select Chain",
-            chains,
-            key="prompt_chain_selector",
-            label_visibility="collapsed"
-        )
-        
-        if selected_chain:
-            # Load chain config
-            chain_config = chain_executor.load_chain(selected_chain)
-            
-            if chain_config:
-                st.caption(chain_config.get('description', ''))
-                st.caption(f"Steps: {len(chain_config.get('steps', []))}")
-                
-                if st.button("▶ Execute Chain", key="execute_prompt_chain", use_container_width=True):
-                    # Get initial input (last few messages or user input)
-                    if st.session_state.chat_history:
-                        initial_input = " ".join([
-                            m.get('question', m.get('content', '')) 
-                            for m in st.session_state.chat_history[-3:]
-                        ])
-                    else:
-                        initial_input = "No conversation context available"
-                    
-                    # Create LLM function wrapper
-                    def llm_function(prompt: str, temperature: float, rag_k: int) -> str:
-                        """Wrapper to call existing LLM function"""
-                        try:
-                            from src import rag_utils
-                            selected_model = st.session_state.get("selected_model", config.OLLAMA_CHAT_MODEL)
-                            
-                            result = rag_utils.answer_question(
-                                question=prompt,
-                                k=rag_k,
-                                raw_mode=False,
-                                rag_threshold=0.25,
-                                model=selected_model
-                            )
-                            
-                            return result.get('response', '')
-                        except Exception as e:
-                            logger.error(f"LLM call failed in prompt chain: {e}")
-                            raise
-                    
-                    # Execute with debug callbacks
-                    execution_container = st.container()
-                    
-                    with execution_container:
-                        st.markdown("### Execution Log")
-                        
-                        step_placeholders = {}
-                        
-                        def debug_callback(step_result):
-                            """Update UI for each step"""
-                            step_num = step_result['step_number']
-                            
-                            if step_num not in step_placeholders:
-                                step_placeholders[step_num] = st.expander(
-                                    f"Step {step_result['step_number']}: {step_result['description']}",
-                                    expanded=True
-                                )
-                            
-                            with step_placeholders[step_num]:
-                                st.caption("Input:")
-                                st.code(step_result['input'][:200] + '...' if len(step_result['input']) > 200 else step_result['input'])
-                                
-                                if step_result['success']:
-                                    st.caption("Output:")
-                                    st.markdown(step_result['output'])
-                                    st.success("✓ Step completed")
-                                else:
-                                    st.error(f"❌ {step_result['error']}")
-                        
-                        # Execute chain
-                        result = execute_chain(
-                            chain_config=chain_config,
-                            initial_input=initial_input,
-                            llm_function=llm_function,
-                            debug_callback=debug_callback
-                        )
-                        
-                        if result['success']:
-                            st.markdown("### Final Output")
-                            st.markdown(result['final_output'])
-                            st.balloons()
-                            
-                            # Optionally add to conversation
-                            if st.button("Add to Conversation", key="add_chain_result"):
-                                st.session_state.chat_history.append({
-                                    'question': f"[Chain: {selected_chain}]",
-                                    'answer': result['final_output'],
-                                    'sources': [],
-                                    'context': '',
-                                    'mode': '⛓️ Prompt Chain',
-                                    'max_relevance': 1.0,
-                                    'model': 'chain',
-                                    'rag_threshold': 0.0,
-                                    'conversation_id': st.session_state.conversation_id
-                                })
-                                st.rerun()
-                        else:
-                            st.error(f"Chain failed: {result['error']}")
-    
-    except Exception as e:
-        logger.error(f"Error rendering prompt chain executor: {e}")
-        st.caption(f"Error: {e}")
-
 # === RAG TRANSPARENCY COMPONENT ===
 def render_rag_transparency():
     """Show RAG context being used with feedback mechanism"""
@@ -1937,13 +2121,18 @@ def render_rag_transparency():
                         st.info("✓ Lowered!")
                         st.rerun()
 
-# Render header
+# NOW open the main container - AFTER sidebar is fully rendered
+st.markdown('<div class="main-container">', unsafe_allow_html=True)
+
+# When sidebar is collapsed, show expand chevron in main area
+if st.session_state.get("sidebar_collapsed", False):
+    st.markdown("""
+    <div class="main-chevron" onclick="toggleSidebarExpand()">⟩</div>
+    """, unsafe_allow_html=True)
+
+# Render header (after sidebar and container setup)
 render_header()
 
-# Render sidebar
-render_sidebar()
-
-# Main content area
 if st.session_state.current_page == "chat":
     # Phase 1: Chat interface as default
     
@@ -2410,6 +2599,16 @@ if st.session_state.current_page == "chat":
     # Phase 7: Fixed input area (handled by st.chat_input above, but we add styling)
     st.markdown('<div class="fixed-input-area"></div>', unsafe_allow_html=True)
 
+elif st.session_state.current_page == "cognitive_ide":
+    # Cognitive IDE - Visual Chain Editor
+    try:
+        from src.components.chain_editor import render_chain_editor
+        render_chain_editor()
+    except Exception as e:
+        logger.error(f"Error rendering Cognitive IDE: {e}")
+        st.error(f"Failed to load Cognitive IDE: {e}")
+        st.info("Make sure all dependencies are installed: pip install pyyaml")
+
 elif st.session_state.current_page == "library":
     # Library page (old Library tab content)
     st.header("Library")
@@ -2676,5 +2875,8 @@ elif st.session_state.current_page == "prompts":
     # Prompts page (old Prompts tab)
     st.header("Prompt Repository")
     st.info("Prompt repository functionality coming soon. Use the FastAPI backend directly for now.")
+
+# Close main container div
+st.markdown('</div>', unsafe_allow_html=True)
 
 # Keyboard shortcuts JavaScript moved to hidden component at top
