@@ -247,7 +247,7 @@ def embed_texts(texts: List[str], model: str = None, keep_alive: Optional[str] =
         raise
 
 
-def chat(prompt: str, model: str = None, stream: bool = False, keep_alive: Optional[str] = None, timeout: int = 60) -> str:
+def chat(prompt: str, model: str = None, stream: bool = False, keep_alive: Optional[str] = None, timeout: int = 600) -> str:
     """
     Generate chat completion using Ollama.
     
@@ -256,7 +256,7 @@ def chat(prompt: str, model: str = None, stream: bool = False, keep_alive: Optio
         model: Model name (defaults to config.OLLAMA_CHAT_MODEL)
         stream: Whether to stream the response
         keep_alive: Optional keep_alive duration (e.g., "10m"). If None, model unloads after use.
-        timeout: Request timeout in seconds (default: 60)
+        timeout: Request timeout in seconds (default: 600)
         
     Returns:
         Generated text response

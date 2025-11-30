@@ -46,7 +46,7 @@ except ImportError:
 CHROMA_PATH = config.VECTOR_DIR
 
 DEFAULT_K = int(os.getenv("RAG_TOP_K", "3"))
-LOCAL_MODEL_TIMEOUT = float(os.getenv("LOCAL_MODEL_TIMEOUT", "300"))
+LOCAL_MODEL_TIMEOUT = config.LOCAL_MODEL_TIMEOUT
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
@@ -255,7 +255,7 @@ def call_local_model(messages: List[Dict]) -> str:
         raise ValueError("No messages provided")
     
     # Call Ollama chat function
-    return ollama_chat(prompt, model=config.OLLAMA_CHAT_MODEL, stream=False)
+    return ollama_chat(prompt, model=config.OLLAMA_CHAT_MODEL, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
 
 
 def answer_question(
@@ -283,7 +283,7 @@ def answer_question(
     # Pure uncensored mode: Skip RAG entirely
     if raw_mode:
         # Direct Ollama call with no context, no Prompt RAG
-        answer = ollama_chat(question, model=model, stream=False)
+        answer = ollama_chat(question, model=model, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
         return {
             "response": answer,
             "sources": [],
@@ -308,7 +308,8 @@ def answer_question(
             answer = ollama_chat(
                 f"{question}\n\n(Note: Low relevance docs skipped for clarity.)",
                 model=model,
-                stream=False
+                stream=False,
+                timeout=int(LOCAL_MODEL_TIMEOUT)
             )
             return {
                 "response": answer,
@@ -322,7 +323,7 @@ def answer_question(
         # Full RAG mode: Use context with Prompt RAG augmentation
         prompt = build_prompt(question, context)
         # Call Ollama directly with model parameter
-        answer = ollama_chat(prompt, model=model, stream=False)
+        answer = ollama_chat(prompt, model=model, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
         
         return {
             "response": answer,
@@ -336,7 +337,7 @@ def answer_question(
     except Exception as e:
         # Fallback to raw mode on error
         logger.error(f"RAG retrieval failed, falling back to raw mode: {e}")
-        answer = ollama_chat(question, model=model, stream=False)
+        answer = ollama_chat(question, model=model, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
         return {
             "response": answer,
             "sources": [],

@@ -335,7 +335,8 @@ def ingest_sources(
     ids: List[str] = []
 
     # Collect all markdown files first for progress tracking
-    md_files = sorted(KNOWLEDGE_DIR.rglob("*.md"))
+    # Include both KNOWLEDGE_DIR and ARCHIVE folder to restore previously ingested documents
+    md_files = sorted(list(KNOWLEDGE_DIR.rglob("*.md")) + list(config.ARCHIVE.rglob("*.md")))
     total_files = len(md_files)
     print(f"[INFO] Scanning {total_files} markdown files...")
 

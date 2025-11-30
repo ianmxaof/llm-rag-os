@@ -60,7 +60,7 @@ class Config(BaseModel):
     LOCAL_MODEL_URL: str = os.getenv(
         "LOCAL_MODEL_URL", "http://127.0.0.1:1234/v1/chat/completions"
     )
-    LOCAL_MODEL_TIMEOUT: float = float(os.getenv("LOCAL_MODEL_TIMEOUT", "120"))
+    LOCAL_MODEL_TIMEOUT: float = float(os.getenv("LOCAL_MODEL_TIMEOUT", "600"))
     
     # Ollama settings
     OLLAMA_API_BASE: str = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/api")
@@ -147,7 +147,7 @@ else:
         'LM_API_HEALTH': os.getenv("LM_API_HEALTH", "http://localhost:1234/v1/models"),
         'LOCAL_MODEL_ID': os.getenv("LOCAL_MODEL_ID", "mistral-7b-instruct-v0.2"),
         'LOCAL_MODEL_URL': os.getenv("LOCAL_MODEL_URL", "http://127.0.0.1:1234/v1/chat/completions"),
-        'LOCAL_MODEL_TIMEOUT': float(os.getenv("LOCAL_MODEL_TIMEOUT", "120")),
+        'LOCAL_MODEL_TIMEOUT': float(os.getenv("LOCAL_MODEL_TIMEOUT", "600")),
         'OLLAMA_API_BASE': os.getenv("OLLAMA_API_BASE", "http://localhost:11434/api"),
         'OLLAMA_EMBED_MODEL': os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
         'OLLAMA_CHAT_MODEL': os.getenv("OLLAMA_CHAT_MODEL", "mistral:7b-instruct-q5_K_M"),

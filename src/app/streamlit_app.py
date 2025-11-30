@@ -629,34 +629,205 @@ def render_sidebar_content():
                 st.caption("Vault not found")
         
         with tab2:
-            st.caption("Ingested Documents")
-            docs_result = safe_execute(
-                lambda: list_documents(),
-                fallback_value={"items": [], "total": 0},
-                error_message="Could not load documents"
+            # Check backend availability
+            kb_backend_available = safe_execute(
+                lambda: check_backend_available(),
+                fallback_value=False,
+                error_message="Could not check backend availability"
             )
-            # Handle both dict response and list response
-            if isinstance(docs_result, dict):
-                docs_list = docs_result.get("items", [])
-            elif isinstance(docs_result, list):
-                docs_list = docs_result
-            else:
-                docs_list = []
             
-            if docs_list:
-                st.markdown("**Recent:**")
-                for doc in docs_list[:5]:
-                    # Handle both dict and string formats
-                    if isinstance(doc, dict):
-                        doc_name = doc.get('source_path', doc.get('name', 'Unknown'))
+            # Always show view modes, regardless of backend availability
+            view_mode = st.radio(
+                "View Mode", 
+                ["Recent Documents", "Chunks View", "Archive View"], 
+                horizontal=True, 
+                key="kb_documents_view_mode"
+            )
+            
+            # Show backend warning if unavailable
+            if not kb_backend_available:
+                st.warning("⚠️ Backend not available. Some features may be limited.")
+            
+            if view_mode == "Recent Documents":
+                st.caption("Ingested Documents")
+                
+                if kb_backend_available:
+                    docs_result = safe_execute(
+                        lambda: list_documents(),
+                        fallback_value={"items": [], "total": 0},
+                        error_message="Could not load documents"
+                    )
+                    # Handle both dict response and list response
+                    if isinstance(docs_result, dict):
+                        docs_list = docs_result.get("items", [])
+                    elif isinstance(docs_result, list):
+                        docs_list = docs_result
                     else:
-                        doc_name = str(doc)
-                    st.markdown(f"- {doc_name}")
-            else:
-                st.caption("No documents ingested yet")
-            
-            if st.button("➕ Ingest New Document", use_container_width=True):
-                st.info("Use the paperclip icon in the chat input to ingest files")
+                        docs_list = []
+                    
+                    if docs_list:
+                        st.markdown("**Recent:**")
+                        for doc in docs_list[:10]:
+                            # Handle both dict and string formats
+                            if isinstance(doc, dict):
+                                doc_name = doc.get('source_path', doc.get('name', 'Unknown'))
+                            else:
+                                doc_name = str(doc)
+                            st.markdown(f"- {doc_name}")
+                    else:
+                        st.caption("No documents ingested yet")
+                else:
+                    st.info("Backend connection required to load documents.")
+                
+                if st.button("➕ Ingest New Document", use_container_width=True, disabled=not kb_backend_available):
+                    st.info("Use the paperclip icon in the chat input to ingest files")
+                
+                elif view_mode == "Chunks View":
+                    st.caption("Document Chunks")
+                    
+                    if kb_backend_available:
+                        if st.button("🔄 Refresh", key="kb_refresh_chunks"):
+                            if "kb_chunks_data" in st.session_state:
+                                del st.session_state.kb_chunks_data
+                        
+                        if "kb_chunks_data" not in st.session_state:
+                            with st.spinner("Loading chunks..."):
+                                try:
+                                    st.session_state.kb_chunks_data = safe_execute(
+                                        lambda: get_chunks(limit=200),  # Limit to 200 for sidebar
+                                        fallback_value={"chunks": [], "total": 0, "sources": 0},
+                                        error_message="Could not load chunks"
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Error loading chunks: {e}", exc_info=True)
+                                    st.session_state.kb_chunks_data = {"chunks": [], "total": 0, "sources": 0, "error": str(e)}
+                        
+                        data = st.session_state.kb_chunks_data
+                        if "error" in data:
+                            st.error(f"Error: {data['error']}")
+                        else:
+                            total_chunks = data.get("total", 0)
+                            sources = data.get("sources", 0)
+                            st.caption(f"**{total_chunks}** chunks from **{sources}** documents")
+                            
+                            if total_chunks == 0:
+                                st.info("No chunks found. Ingest some documents first!")
+                            else:
+                                # Group chunks by source document
+                                chunks_by_source = {}
+                                for chunk in data.get("chunks", []):
+                                    source = chunk.get("source", "unknown")
+                                    if source not in chunks_by_source:
+                                        chunks_by_source[source] = []
+                                    chunks_by_source[source].append(chunk)
+                                
+                                # Show top 5 sources (to keep sidebar manageable)
+                                for idx, (source, chunks) in enumerate(list(chunks_by_source.items())[:5]):
+                                    filename = source.split("/")[-1] if "/" in source else source
+                                    with st.expander(f"📄 {filename} ({len(chunks)} chunks)", expanded=False):
+                                        # Show first 3 chunks per document
+                                        for chunk in chunks[:3]:
+                                            chunk_idx = chunk.get("chunk_index", 0)
+                                            text_preview = chunk.get("text_preview", "")
+                                            text_length = chunk.get("text_length", 0)
+                                            st.markdown(f"**Chunk {chunk_idx}** ({text_length} chars)")
+                                            st.code(text_preview[:200] + "..." if len(text_preview) > 200 else text_preview, language="markdown")
+                                            st.markdown("---")
+                                
+                                if len(chunks_by_source) > 5:
+                                    st.caption(f"... and {len(chunks_by_source) - 5} more documents")
+                    else:
+                        st.info("Backend connection required to load chunks.")
+                
+                else:  # Archive View
+                    st.caption("Archived Documents")
+                    
+                    if kb_backend_available:
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            search_term = st.text_input("Search", key="kb_archive_search", placeholder="Enter filename...")
+                        with col2:
+                            page_size = st.selectbox("Per page", [5, 10, 20], index=0, key="kb_archive_page_size")
+                        
+                        if "kb_archive_page" not in st.session_state:
+                            st.session_state.kb_archive_page = 1
+                        
+                        archive_data = safe_execute(
+                            lambda: get_archived_documents(
+                                page=st.session_state.kb_archive_page,
+                                search=search_term if search_term else None,
+                                limit=page_size
+                            ),
+                            fallback_value={"files": [], "total": 0, "pages": 1},
+                            error_message="Could not load archive"
+                        )
+                        
+                        if "error" in archive_data:
+                            st.error(f"Error: {archive_data['error']}")
+                        else:
+                            total_files = archive_data.get("total", 0)
+                            files = archive_data.get("files", [])
+                            pages = archive_data.get("pages", 1)
+                            st.caption(f"**{total_files}** archived files")
+                            
+                            if total_files == 0:
+                                st.info("No archived files found.")
+                            else:
+                                if pages > 1:
+                                    col1, col2, col3 = st.columns([1, 2, 1])
+                                    with col1:
+                                        if st.button("◀", disabled=st.session_state.kb_archive_page <= 1, key="kb_archive_prev"):
+                                            st.session_state.kb_archive_page -= 1
+                                            st.rerun()
+                                    with col2:
+                                        st.caption(f"Page {st.session_state.kb_archive_page} of {pages}")
+                                    with col3:
+                                        if st.button("▶", disabled=st.session_state.kb_archive_page >= pages, key="kb_archive_next"):
+                                            st.session_state.kb_archive_page += 1
+                                            st.rerun()
+                                
+                                for file_info in files:
+                                    filename = file_info['name']
+                                    file_path = file_info['path']
+                                    
+                                    with st.expander(f"📄 {filename}", expanded=False):
+                                        file_size_kb = file_info['size'] / 1024
+                                        modified_date = file_info.get('modified', '')[:10] if file_info.get('modified') else 'Unknown'
+                                        st.caption(f"Size: {file_size_kb:.1f} KB | Modified: {modified_date}")
+                                        
+                                        if file_info.get('ai_summary'):
+                                            st.info(f"**Summary:** {file_info['ai_summary']}")
+                                        
+                                        if file_info.get('ai_tags'):
+                                            tag_cols = st.columns(min(len(file_info['ai_tags']), 3))
+                                            for idx, tag in enumerate(file_info['ai_tags'][:3]):
+                                                with tag_cols[idx % 3]:
+                                                    st.chip(tag)
+                                        
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            if st.button("📝 Open", key=f"kb_open_{filename}", use_container_width=True):
+                                                cursor_url = f"cursor://file/{os.path.abspath(file_path)}"
+                                                try:
+                                                    webbrowser.open(cursor_url)
+                                                    st.success("Opening...")
+                                                except Exception as e:
+                                                    webbrowser.open(f"file://{os.path.dirname(os.path.abspath(file_path))}")
+                                        with col2:
+                                            if st.button("🔄 Re-ingest", key=f"kb_reingest_{filename}", use_container_width=True, disabled=not kb_backend_available):
+                                                with st.spinner("Re-ingesting..."):
+                                                    result = ingest_file(file_path)
+                                                    if result.get("success"):
+                                                        st.success("Re-ingested!")
+                                                        st.rerun()
+                                                    else:
+                                                        st.error(f"Failed: {result.get('message', 'Unknown error')}")
+                                        
+                                        if file_info.get('preview'):
+                                            with st.expander("Preview"):
+                                                st.code(file_info['preview'][:500] + "..." if len(file_info.get('preview', '')) > 500 else file_info.get('preview', ''), language="markdown")
+                    else:
+                        st.info("Backend connection required to load archived documents.")
         
         with tab3:
             st.markdown("""
@@ -892,42 +1063,61 @@ st.set_page_config(
 # === SIDEBAR MUST BE RENDERED IMMEDIATELY AFTER set_page_config ===
 # In Streamlit v1.38+ with layout="centered", ANY st. command before sidebar kills it
 with st.sidebar:
-    # New Chat button - small pill shape
-    if st.button("🆕 New Chat", key="new_chat_sidebar", type="primary"):
+    # Set sidebar width from session state (for JavaScript to read)
+    sidebar_width = st.session_state.get("sidebar_width", 280)
+    st.markdown(f'<div data-sidebar-width="{sidebar_width}" style="display:none;"></div>', unsafe_allow_html=True)
+    
+    # New Chat pill - Grok.com style
+    st.markdown("""
+    <button class="new-chat-btn" onclick="
+        const url = new URL(window.location);
+        url.searchParams.set('new_chat', 'true');
+        window.location.href = url.toString();
+    ">
+        New Chat
+    </button>
+    """, unsafe_allow_html=True)
+    
+    # Check for new_chat URL parameter
+    if st.query_params.get("new_chat") == "true":
         st.session_state.chat_history = []
         st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        params = dict(st.query_params)
+        params.pop("new_chat", None)
+        st.query_params.clear()
+        for key, value in params.items():
+            st.query_params[key] = value
         st.rerun()
     
-    st.markdown("---")
-    
-    pages = {
-        "Chat": "chat",
-        "Cognitive IDE": "cognitive_ide",
-        "Library": "library",
-        "Ingest": "ingest",
-        "Visualize": "visualize",
-        "Graph": "graph",
-        "Settings": "settings",
-        "Prompts": "prompts"
-    }
+    # Navigation items — tight, left-aligned (Grok.com style)
+    nav_items = [
+        ("Chat", "chat"),
+        ("Cognitive IDE", "cognitive_ide"),
+        ("Ingest", "ingest"),
+        ("Visualize", "visualize"),
+        ("Graph", "graph"),
+        ("Settings", "settings"),
+        ("Prompts", "prompts")
+    ]
     
     current_page = st.session_state.get("current_page", "chat")
-    for page_name, page_key in pages.items():
-        # Highlight active page with purple accent
-        button_type = "primary" if page_key == current_page else "secondary"
-        if st.button(page_name, key=f"nav_{page_key}", use_container_width=True, type=button_type):
+    for label, page_key in nav_items:
+        is_active = page_key == current_page
+        # Add custom HTML to mark active button
+        if is_active:
+            st.markdown(f"""
+            <script>
+                setTimeout(function() {{
+                    const btn = document.querySelector('button[data-testid="nav_{page_key}"]');
+                    if (btn) btn.classList.add('active-page');
+                }}, 100);
+            </script>
+            """, unsafe_allow_html=True)
+        if st.button(label, key=f"nav_{page_key}", use_container_width=True, type="secondary"):
             st.session_state.current_page = page_key
             st.rerun()
     
-    # Floating chevron button on sidebar right edge (when expanded)
-    if not st.session_state.get("sidebar_collapsed", False):
-        st.markdown("""
-        <div class="sidebar-chevron" onclick="toggleSidebarCollapse()">⟨</div>
-        """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    # Render the rest of sidebar content (expanders, etc.)
+    # Render the rest of sidebar content (expanders, etc.) - no divider
     render_sidebar_content()
 
 # === NOW inject global CSS and JavaScript AFTER sidebar ===
@@ -978,30 +1168,97 @@ components.html("""
         return false;
     };
     
-    // Chevron button handlers for sidebar toggle - Enhanced with class management
+    // Subtle sidebar toggle handlers - Claude/Grok style
     window.toggleSidebarCollapse = function() {
         const toggleBtn = document.querySelector('[data-testid="collapsedControl"]');
-        if (toggleBtn) {
+        const headerToggleBtn = document.querySelector('header [data-testid="stBaseButton-headerNoPadding"]');
+        
+        // Try collapsed control first, then header button
+        const btn = toggleBtn || headerToggleBtn;
+        if (btn) {
             document.body.classList.add('sidebar-collapsed');
             const sidebar = document.querySelector('section[data-testid="stSidebar"]');
             if (sidebar) {
                 sidebar.classList.add('collapsed');
             }
-            toggleBtn.click();
+            btn.click();
+            // Update visibility after click
+            setTimeout(syncSidebarState, 100);
         }
     };
     
     window.toggleSidebarExpand = function() {
         const toggleBtn = document.querySelector('[data-testid="collapsedControl"]');
-        if (toggleBtn) {
+        const headerToggleBtn = document.querySelector('header [data-testid="stBaseButton-headerNoPadding"]');
+        
+        // Try collapsed control first, then header button
+        const btn = toggleBtn || headerToggleBtn;
+        if (btn) {
             document.body.classList.remove('sidebar-collapsed');
             const sidebar = document.querySelector('section[data-testid="stSidebar"]');
             if (sidebar) {
                 sidebar.classList.remove('collapsed');
             }
-            toggleBtn.click();
+            btn.click();
+            // Update visibility after click
+            setTimeout(syncSidebarState, 100);
         }
     };
+    
+    // Monitor sidebar state and sync body class
+    function syncSidebarState() {
+        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+        if (sidebar) {
+            const isExpanded = sidebar.getAttribute('aria-expanded') === 'true';
+            if (isExpanded) {
+                document.body.classList.remove('sidebar-collapsed');
+                sidebar.classList.remove('collapsed');
+            } else {
+                document.body.classList.add('sidebar-collapsed');
+                sidebar.classList.add('collapsed');
+            }
+        }
+    }
+    
+    // Watch for sidebar state changes
+    let sidebarObserver = null;
+    
+    function initSidebarObserver() {
+        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+        if (sidebar && !sidebarObserver) {
+            sidebarObserver = new MutationObserver(function(mutations) {
+                syncSidebarState();
+            });
+            
+            sidebarObserver.observe(sidebar, {
+                attributes: true,
+                attributeFilter: ['aria-expanded', 'class']
+            });
+            
+            // Initial sync
+            syncSidebarState();
+        }
+    }
+    
+    // Initialize observer when DOM is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(initSidebarObserver, 300);
+        });
+    } else {
+        setTimeout(initSidebarObserver, 300);
+    }
+    
+    // Also check periodically in case sidebar loads late
+    let checkCount = 0;
+    const checkInterval = setInterval(function() {
+        checkCount++;
+        if (checkCount > 10) {
+            clearInterval(checkInterval);
+        }
+        initSidebarObserver();
+        syncSidebarState();
+    }, 500);
     
     // Sync sidebar state on page load - ensure sidebar is expanded by default
     function syncSidebarState() {
@@ -1066,6 +1323,370 @@ components.html("""
             alert('Keyboard Shortcuts:\\n\\nCmd/Ctrl+K: Focus input\\nEsc: Clear input\\nCmd/Ctrl+/: Show this help');
         }
     });
+    
+    // Mark active sidebar page button - Grok.com style
+    function markActiveSidebarButton() {
+        // Get all sidebar nav buttons
+        const buttons = document.querySelectorAll('section[data-testid="stSidebar"] button[data-testid^="nav_"]');
+        buttons.forEach(btn => {
+            btn.classList.remove('active-page');
+        });
+        // The active button will be marked by inline script in Python
+    }
+    
+    // Run after DOM loads and on reruns
+    setTimeout(markActiveSidebarButton, 300);
+    setInterval(markActiveSidebarButton, 1000);
+    
+    // Sidebar resize functionality
+    function initSidebarResize() {
+        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+        if (!sidebar) return;
+        
+        // Check if resize handle already exists
+        let resizeHandle = sidebar.querySelector('.sidebar-resize-handle');
+        if (!resizeHandle) {
+            resizeHandle = document.createElement('div');
+            resizeHandle.className = 'sidebar-resize-handle';
+            resizeHandle.setAttribute('data-testid', 'sidebar-resize-handle');
+            sidebar.appendChild(resizeHandle);
+        }
+        
+        // Ensure it's visible and positioned correctly
+        resizeHandle.style.display = 'block';
+        resizeHandle.style.position = 'absolute';
+        resizeHandle.style.top = '0';
+        resizeHandle.style.right = '0';
+        resizeHandle.style.width = '8px';
+        resizeHandle.style.height = '100%';
+        resizeHandle.style.zIndex = '10000';
+        resizeHandle.style.pointerEvents = 'auto';
+        resizeHandle.style.cursor = 'col-resize';
+        
+        let isResizing = false;
+        let startX = 0;
+        let startWidth = 0;
+        const minWidth = 200;
+        const maxWidth = 1200;
+        
+        // Get initial width from data attribute (set by Python), localStorage, or use current width
+        let currentWidth = sidebar.offsetWidth || 280;
+        
+        // Try to get width from data attribute (set by Python in sidebar)
+        const dataWidthElement = document.querySelector('[data-sidebar-width]');
+        if (dataWidthElement) {
+            const dataWidth = dataWidthElement.getAttribute('data-sidebar-width');
+            if (dataWidth) {
+                const width = parseInt(dataWidth);
+                if (width >= minWidth && width <= maxWidth) {
+                    currentWidth = width;
+                }
+            }
+        }
+        
+        // Fallback to localStorage if data attribute not found
+        if (currentWidth === (sidebar.offsetWidth || 280)) {
+            const savedWidth = localStorage.getItem('sidebar_width');
+            if (savedWidth) {
+                const width = parseInt(savedWidth);
+                if (width >= minWidth && width <= maxWidth) {
+                    currentWidth = width;
+                }
+            }
+        }
+        
+        // Set initial width
+        sidebar.style.width = currentWidth + 'px';
+        sidebar.style.flexShrink = '0';
+        sidebar.style.flexGrow = '0';
+        
+        let savedScrollTop = 0;
+        let scrollLocked = false;
+        
+        resizeHandle.addEventListener('mousedown', function(e) {
+            // Prevent any default behavior that might cause scrolling
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            
+            isResizing = true;
+            startX = e.clientX;
+            startWidth = sidebar.offsetWidth;
+            
+            // Save current scroll position BEFORE any changes
+            const sidebarContent = sidebar.querySelector('div[style*="overflow"]') || 
+                                   sidebar.querySelector('div') || 
+                                   sidebar;
+            savedScrollTop = sidebarContent.scrollTop || 0;
+            scrollLocked = true;
+            
+            // Lock scroll position immediately
+            sidebar.style.overflowY = 'hidden';
+            sidebar.style.overflowX = 'hidden';
+            document.body.style.overflow = 'hidden';
+            document.body.classList.add('resizing');
+            resizeHandle.classList.add('dragging');
+            document.body.style.userSelect = 'none';
+            
+            // Force scroll position to stay
+            if (sidebarContent) {
+                sidebarContent.scrollTop = savedScrollTop;
+            }
+        });
+        
+        document.addEventListener('mousemove', function(e) {
+            if (!isResizing) return;
+            
+            // Prevent scroll during resize
+            e.preventDefault();
+            
+            const diff = e.clientX - startX;
+            let newWidth = startWidth + diff;
+            
+            // Enforce min/max constraints
+            if (newWidth < minWidth) newWidth = minWidth;
+            if (newWidth > maxWidth) newWidth = maxWidth;
+            
+            sidebar.style.width = newWidth + 'px';
+            currentWidth = newWidth;
+            
+            // Maintain scroll position
+            if (scrollLocked) {
+                const sidebarContent = sidebar.querySelector('div[style*="overflow"]') || sidebar;
+                if (sidebarContent) {
+                    sidebarContent.scrollTop = savedScrollTop;
+                }
+            }
+        });
+        
+        document.addEventListener('mouseup', function(e) {
+            if (isResizing) {
+                isResizing = false;
+                scrollLocked = false;
+                
+                // Restore scroll behavior
+                sidebar.style.overflowY = '';
+                sidebar.style.overflowX = '';
+                document.body.style.overflow = '';
+                document.body.classList.remove('resizing');
+                resizeHandle.classList.remove('dragging');
+                document.body.style.userSelect = '';
+                
+                // Restore scroll position
+                const sidebarContent = sidebar.querySelector('div[style*="overflow"]') || 
+                                       sidebar.querySelector('div') || 
+                                       sidebar;
+                if (sidebarContent && savedScrollTop >= 0) {
+                    sidebarContent.scrollTop = savedScrollTop;
+                }
+                
+                // Store width in localStorage for persistence
+                localStorage.setItem('sidebar_width', currentWidth.toString());
+                
+                // Update data attribute so Python can read it
+                sidebar.setAttribute('data-width', currentWidth.toString());
+            }
+        });
+        
+        // Width loading is handled above in initialization
+    }
+    
+    // Check sidebar content for overflow and calculate required width
+    function checkSidebarOverflow() {
+        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+        if (!sidebar) return null;
+        
+        // Find all expanded expanders
+        const expanders = sidebar.querySelectorAll('[data-testid="stExpander"]');
+        let maxRequiredWidth = 0;
+        const margin = 32; // 16px padding on each side
+        
+        expanders.forEach(function(expander) {
+            // Check if expander is expanded (aria-expanded="true")
+            const isExpanded = expander.getAttribute('aria-expanded') === 'true';
+            if (!isExpanded) return;
+            
+            // Find the content area of the expander
+            const contentArea = expander.querySelector('[data-testid="stExpanderContent"]') || 
+                               expander.querySelector('.streamlit-expanderContent') ||
+                               expander;
+            
+            // Check for overflow
+            if (contentArea.scrollWidth > contentArea.clientWidth) {
+                // Content is overflowing
+                const requiredWidth = contentArea.scrollWidth + margin;
+                if (requiredWidth > maxRequiredWidth) {
+                    maxRequiredWidth = requiredWidth;
+                }
+            }
+            
+            // Also check all child elements for overflow
+            const childElements = contentArea.querySelectorAll('*');
+            childElements.forEach(function(element) {
+                if (element.scrollWidth > element.clientWidth) {
+                    const elementWidth = element.scrollWidth + margin;
+                    // Get the element's position relative to sidebar
+                    const rect = element.getBoundingClientRect();
+                    const sidebarRect = sidebar.getBoundingClientRect();
+                    const elementRight = rect.right - sidebarRect.left;
+                    const requiredWidth = elementRight + margin;
+                    if (requiredWidth > maxRequiredWidth) {
+                        maxRequiredWidth = requiredWidth;
+                    }
+                }
+            });
+        });
+        
+        // Also check sidebar content container itself
+        const sidebarContent = sidebar.querySelector('div[style*="padding"]') || sidebar;
+        if (sidebarContent.scrollWidth > sidebarContent.clientWidth) {
+            const requiredWidth = sidebarContent.scrollWidth + margin;
+            if (requiredWidth > maxRequiredWidth) {
+                maxRequiredWidth = requiredWidth;
+            }
+        }
+        
+        return maxRequiredWidth > 0 ? Math.ceil(maxRequiredWidth) : null;
+    }
+    
+    // Auto-expand sidebar to fit overflowing content
+    function autoExpandSidebar() {
+        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+        if (!sidebar) return;
+        
+        const requiredWidth = checkSidebarOverflow();
+        if (!requiredWidth) return;
+        
+        const minWidth = 200;
+        const maxWidth = 1200;
+        const currentWidth = sidebar.offsetWidth || 280;
+        
+        // Only expand if required width is greater than current width
+        if (requiredWidth > currentWidth) {
+            // Respect max width constraint
+            let newWidth = Math.min(requiredWidth, maxWidth);
+            
+            // Smoothly expand sidebar
+            sidebar.style.transition = 'width 0.3s ease';
+            sidebar.style.width = newWidth + 'px';
+            
+            // Update stored width
+            localStorage.setItem('sidebar_width', newWidth.toString());
+            sidebar.setAttribute('data-width', newWidth.toString());
+            
+            // Remove transition after animation completes
+            setTimeout(function() {
+                sidebar.style.transition = '';
+            }, 300);
+        }
+    }
+    
+    // Initialize resize handle when sidebar is ready
+    function initSidebarResizeWhenReady() {
+        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+        if (sidebar && sidebar.offsetWidth > 0) {
+            initSidebarResize();
+        } else {
+            setTimeout(initSidebarResizeWhenReady, 100);
+        }
+    }
+    
+    // Start initialization
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(initSidebarResizeWhenReady, 500);
+        });
+    } else {
+        setTimeout(initSidebarResizeWhenReady, 500);
+    }
+    
+    // Also reinitialize after Streamlit reruns
+    const resizeObserver = new MutationObserver(function(mutations) {
+        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+        if (sidebar && !sidebar.querySelector('.sidebar-resize-handle')) {
+            initSidebarResizeWhenReady();
+        }
+    });
+    
+    resizeObserver.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+    
+    // Monitor expander state changes for auto-expand
+    function initExpanderObserver() {
+        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+        if (!sidebar) {
+            setTimeout(initExpanderObserver, 500);
+            return;
+        }
+        
+        // Check for overflow on initial load
+        setTimeout(function() {
+            autoExpandSidebar();
+        }, 500);
+        
+        // Watch for expander state changes
+        const expanderObserver = new MutationObserver(function(mutations) {
+            let shouldCheck = false;
+            
+            mutations.forEach(function(mutation) {
+                // Check if aria-expanded attribute changed
+                if (mutation.type === 'attributes' && mutation.attributeName === 'aria-expanded') {
+                    shouldCheck = true;
+                }
+                // Check if expander content was added/removed
+                if (mutation.type === 'childList') {
+                    const target = mutation.target;
+                    if (target.hasAttribute && target.hasAttribute('data-testid') && 
+                        target.getAttribute('data-testid') === 'stExpander') {
+                        shouldCheck = true;
+                    }
+                    // Check if any added nodes are expanders
+                    mutation.addedNodes.forEach(function(node) {
+                        if (node.nodeType === 1 && node.hasAttribute && 
+                            node.getAttribute('data-testid') === 'stExpander') {
+                            shouldCheck = true;
+                        }
+                    });
+                }
+            });
+            
+            if (shouldCheck) {
+                // Debounce the check
+                setTimeout(function() {
+                    autoExpandSidebar();
+                }, 100);
+            }
+        });
+        
+        // Observe sidebar for expander changes
+        expanderObserver.observe(sidebar, {
+            attributes: true,
+            attributeFilter: ['aria-expanded'],
+            childList: true,
+            subtree: true
+        });
+        
+        // Also listen for click events on expander headers (faster detection)
+        sidebar.addEventListener('click', function(e) {
+            const expander = e.target.closest('[data-testid="stExpander"]');
+            if (expander) {
+                setTimeout(function() {
+                    autoExpandSidebar();
+                }, 150);
+            }
+        }, true);
+    }
+    
+    // Initialize expander observer when sidebar is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(initExpanderObserver, 1000);
+        });
+    } else {
+        setTimeout(initExpanderObserver, 1000);
+    }
 })();
 </script>
 """, height=0, width=0)
@@ -1135,12 +1756,203 @@ if "chat_logger" not in st.session_state:
 # Claude/Grok Design Language CSS - Consolidated and moved after sidebar
 st.markdown("""
 <style>
-    /* FORCE SIDEBAR TO EXIST */
+    /* GROK.COM SIDEBAR — FINAL 4 PX GAP — NOVEMBER 2025 */
     section[data-testid="stSidebar"] {
-        min-width: 280px !important;
-        width: 280px !important;
+        background: #000000 !important;
+        padding: 12px 0 0 0 !important;
+        width: 260px !important;
+        min-width: 260px !important;
         flex-shrink: 0 !important;
-        transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        position: relative !important;
+        z-index: 1 !important;
+    }
+    
+    section[data-testid="stSidebar"].collapsed {
+        width: 0 !important;
+        min-width: 0 !important;
+        overflow: hidden !important;
+    }
+    
+    /* Kill every possible gap source */
+    section[data-testid="stSidebar"] > div,
+    section[data-testid="stSidebar"] div[data-testid="stSidebarNav"],
+    section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        justify-content: flex-start !important;
+    }
+    
+    /* Force exactly 4px between items */
+    section[data-testid="stSidebar"] .stButton {
+        margin: 2px 0 !important;   /* 2px top + 2px bottom = 4px total gap */
+        width: 100% !important;
+        display: flex !important;
+        justify-content: flex-start !important;
+        align-items: flex-start !important;
+    }
+    
+    /* Button itself — zero extra space, left-aligned */
+    section[data-testid="stSidebar"] .stButton > button {
+        background: transparent !important;
+        border: none !important;
+        color: #e4e4e7 !important;
+        font-family: 'Inter', system-ui, sans-serif !important;
+        font-size: 13.5px !important;
+        font-weight: 500 !important;
+        padding: 0 20px !important;
+        margin: 0 !important;
+        height: 32px !important;
+        line-height: 32px !important;
+        text-align: left !important;
+        width: 100% !important;
+        border-radius: 6px !important;
+        transition: background 0.15s ease !important;
+        display: flex !important;
+        justify-content: flex-start !important;
+        align-items: center !important;
+    }
+    
+    /* Hover & active — exact Grok */
+    section[data-testid="stSidebar"] .stButton > button:hover,
+    section[data-testid="stSidebar"] .stButton > button.active-page,
+    section[data-testid="stSidebar"] .stButton > button[aria-selected="true"] {
+        background: #1c1c1c !important;
+        color: #ffffff !important;
+        font-weight: 600 !important;
+    }
+    
+    /* New Chat pill — unchanged */
+    .new-chat-btn {
+        margin: 0 16px 16px 16px !important;
+        height: 32px !important;
+        line-height: 32px !important;
+        padding: 0 16px !important;
+        background: #8b5cf6 !important;
+        color: white !important;
+        font-size: 13.5px !important;
+        font-weight: 600 !important;
+        border-radius: 20px !important;
+        text-align: center !important;
+        display: block !important;
+        cursor: pointer !important;
+        border: none !important;
+        transition: background 0.15s ease !important;
+    }
+    
+    .new-chat-btn:hover {
+        background: #7c3aed !important;
+    }
+    
+    /* REMOVE ALL DIVIDERS & GAPS */
+    section[data-testid="stSidebar"] hr,
+    section[data-testid="stSidebar"] [data-testid="stSidebarNav"] + div,
+    section[data-testid="stSidebar"] div[style*="border-top"],
+    section[data-testid="stSidebar"] div[style*="margin-top: 1rem"] {
+        display: none !important;
+    }
+    
+    /* Subtle collapse/expand buttons — exact Claude style */
+    section[data-testid="stSidebar"] .sidebar-toggle {
+        position: absolute !important;
+        top: 12px !important;
+        right: 12px !important;
+        width: 28px !important;
+        height: 28px !important;
+        background: rgba(255,255,255,0.08) !important;
+        border: 1px solid rgba(255,255,255,0.15) !important;
+        border-radius: 6px !important;
+        color: #ccc !important;
+        font-size: 14px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        z-index: 100 !important;
+        backdrop-filter: blur(4px) !important;
+        transition: all 0.2s ease !important;
+    }
+    
+    section[data-testid="stSidebar"] .sidebar-toggle:hover {
+        background: rgba(255,255,255,0.15) !important;
+        color: white !important;
+    }
+    
+    section[data-testid="stSidebar"].collapsed .sidebar-toggle {
+        display: none !important;
+    }
+    
+    .main-expand-toggle {
+        position: fixed !important;
+        left: 0 !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        width: 32px !important;
+        height: 80px !important;
+        background: rgba(80, 80, 90, 0.95) !important;
+        color: white !important;
+        font-size: 18px !important;
+        display: none !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        z-index: 9999 !important;
+        border-top-right-radius: 8px !important;
+        border-bottom-right-radius: 8px !important;
+        box-shadow: 2px 0 8px rgba(0,0,0,0.3) !important;
+        transition: all 0.2s ease !important;
+    }
+    
+    .main-expand-toggle:hover {
+        background: rgba(100, 100, 110, 0.95) !important;
+    }
+    
+    body.sidebar-collapsed .main-expand-toggle {
+        display: flex !important;
+    }
+    
+    /* Make Streamlit's native collapsed control button visible and styled when sidebar is collapsed */
+    [data-testid="collapsedControl"] {
+        position: fixed !important;
+        left: 0 !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        z-index: 9998 !important;
+        background: rgba(80, 80, 90, 0.95) !important;
+        border-top-right-radius: 8px !important;
+        border-bottom-right-radius: 8px !important;
+        box-shadow: 2px 0 8px rgba(0,0,0,0.3) !important;
+        min-width: 32px !important;
+        min-height: 80px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+    }
+    
+    [data-testid="collapsedControl"]:hover {
+        background: rgba(100, 100, 110, 0.95) !important;
+    }
+    
+    /* Hide native button when sidebar is expanded */
+    section[data-testid="stSidebar"][aria-expanded="true"] ~ * [data-testid="collapsedControl"],
+    body:not(.sidebar-collapsed) [data-testid="collapsedControl"]:not(:hover) {
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+    
+    /* Show native button when sidebar is collapsed - override any hiding */
+    body.sidebar-collapsed [data-testid="collapsedControl"],
+    section[data-testid="stSidebar"][aria-expanded="false"] ~ * [data-testid="collapsedControl"] {
+        display: flex !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        pointer-events: auto !important;
     }
     
     /* Main container - centered with max-width 1200px */
@@ -1150,10 +1962,23 @@ st.markdown("""
         padding: 0 100px;
     }
     
-    /* Reduce top void - tighter spacing */
+    /* Reduce top void - minimal spacing */
     .main .block-container {
-        padding-top: 1rem !important;
-        padding-bottom: 1rem !important;
+        padding-top: 0.25rem !important;
+        padding-bottom: 0.5rem !important;
+    }
+    
+    /* Remove extra spacing from first element */
+    .main-container > *:first-child {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+    
+    /* Tighten header spacing */
+    .header-logo {
+        margin-top: 0 !important;
+        margin-bottom: 0.5rem !important;
+        padding-top: 0 !important;
     }
     
     /* Fixed header bar */
@@ -1183,70 +2008,119 @@ st.markdown("""
     .chat-container {
         flex: 1;
         overflow-y: auto;
-        padding: 20px;
+        padding: 10px 20px;
         padding-bottom: 100px;
         max-width: 1200px;
         margin: 0 auto;
         width: 100%;
+        min-height: 0;
     }
     
-    /* Chevron buttons for sidebar control - Purple obelisk style */
-    .sidebar-chevron {
-        position: fixed;
-        top: 50%;
-        right: 8px;
-        transform: translateY(-50%);
-        background: rgba(138, 43, 226, 0.9);
-        color: white;
-        width: 32px;
-        height: 64px;
-        border-radius: 8px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 24px;
-        cursor: pointer;
-        z-index: 9999;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    /* Remove empty chat-container spacing */
+    .chat-container:empty {
+        display: none !important;
+        min-height: 0 !important;
+        padding: 0 !important;
+        margin: 0 !important;
     }
     
-    .main-chevron {
-        position: fixed;
-        left: 16px;
-        top: 50%;
-        transform: translateY(-50%);
-        background: rgba(138, 43, 226, 0.9);
-        color: white;
-        width: 32px;
-        height: 64px;
-        border-radius: 8px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 24px;
-        cursor: pointer;
-        z-index: 9999;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-    }
     
     /* Visual density adjustments - tighter spacing throughout */
     .main-container .stButton > button {
-        padding: 6px 16px !important;
-        font-size: 13px !important;
+        padding: 4px 12px !important;
+        font-size: 12px !important;
         border-radius: 6px !important;
-        min-height: 36px !important;
+        min-height: 32px !important;
     }
     
     .main-container input[type="text"],
     .main-container textarea {
-        padding: 8px 12px !important;
-        font-size: 14px !important;
-        border-radius: 8px !important;
+        padding: 6px 10px !important;
+        font-size: 13px !important;
+        border-radius: 6px !important;
     }
     
     .main-container .stSelectbox > div > div {
-        padding: 6px 12px !important;
+        padding: 4px 10px !important;
+        font-size: 12px !important;
+    }
+    
+    /* Compact checkbox */
+    .main-container [data-baseweb="checkbox"] {
+        font-size: 12px !important;
+        padding: 2px 0 !important;
+    }
+    
+    /* Compact slider */
+    .main-container .stSlider {
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+    }
+    
+    .main-container .stSlider > div {
+        padding: 0 !important;
+    }
+    
+    /* Compact captions */
+    .main-container .stCaption {
+        font-size: 11px !important;
+        margin-top: 0.125rem !important;
+        margin-bottom: 0.125rem !important;
+    }
+    
+    /* Reduce spacing in header row */
+    .main-container > div:first-child [data-testid="column"] {
+        padding: 0 4px !important;
+    }
+    
+    /* Compact text inputs in header */
+    .main-container input[placeholder*="metacog"],
+    .main-container .stSelectbox {
+        margin-bottom: 0 !important;
+    }
+    
+    /* Compact checkbox in header */
+    .main-container [data-baseweb="checkbox"] label {
+        font-size: 12px !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+    
+    /* Ensure header row elements align properly */
+    .main-container > div:first-child {
+        display: flex !important;
+        align-items: flex-start !important;
+        gap: 0.5rem !important;
+    }
+    
+    /* Reduce all font sizes for tighter UI */
+    .main-container {
         font-size: 13px !important;
+    }
+    
+    .main-container p {
+        font-size: 13px !important;
+        margin: 0.25rem 0 !important;
+    }
+    
+    /* Ensure all header row elements have consistent height - 32px to match custom INVENT LAW button */
+    .main-container > div:first-child [data-testid="column"] input,
+    .main-container > div:first-child [data-testid="column"] [data-baseweb="select"] {
+        min-height: 32px !important;
+        height: 32px !important;
+    }
+    
+    /* Match selectbox height */
+    .main-container > div:first-child [data-testid="column"] [data-baseweb="select"] > div {
+        min-height: 32px !important;
+        height: 32px !important;
+    }
+    
+    /* Ensure checkbox aligns properly with 32px height */
+    .main-container > div:first-child [data-testid="column"] [data-baseweb="checkbox"] {
+        display: flex !important;
+        align-items: center !important;
+        height: 32px !important;
     }
     
     /* Cards and panels - inset premium feel */
@@ -1423,12 +2297,64 @@ st.markdown("""
         animation: none !important;
     }
     
-    /* Header logo smaller */
+    /* Header logo - centered and slightly larger */
+    .header-logo-centered {
+        font-size: 22px;
+        font-weight: 600;
+        margin: 0 auto !important;
+        margin-bottom: 1.25rem !important;
+        padding: 0 !important;
+        line-height: 1.2 !important;
+        text-align: center !important;
+        color: rgba(255, 255, 255, 0.95) !important;
+    }
+    
+    /* Legacy header-logo for backwards compatibility */
     .header-logo {
         font-size: 18px;
         font-weight: 600;
-        margin: 0;
-        padding: 0;
+        margin: 0 !important;
+        margin-bottom: 0.25rem !important;
+        padding: 0 !important;
+        line-height: 1.2 !important;
+    }
+    
+    /* Reduce spacing in Streamlit columns */
+    [data-testid="column"] {
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+    }
+    
+    /* Reduce spacing between Streamlit elements */
+    .element-container {
+        margin-top: 0.125rem !important;
+        margin-bottom: 0.125rem !important;
+    }
+    
+    /* Remove spacing from first row of columns */
+    .main-container > div:first-child [data-testid="column"] {
+        padding-top: 0 !important;
+        margin-top: 0 !important;
+    }
+    
+    /* Tighten header row specifically */
+    .main-container > div:first-child {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+    
+    /* Reduce spacing in st.columns */
+    .stColumns > div {
+        padding-top: 0 !important;
+        margin-top: 0 !important;
+    }
+    
+    /* Remove label spacing when label_visibility="collapsed" */
+    .stTextInput label,
+    .stSelectbox label {
+        margin-bottom: 0 !important;
     }
     
     /* Perfect Grok input icons */
@@ -1494,12 +2420,102 @@ st.markdown("""
     /* Sidebar - Denser Claude/Grok style */
     section[data-testid="stSidebar"] {
         background: linear-gradient(180deg, #0a0a0a 0%, #111 100%) !important;
+        position: relative !important;
+        min-width: 200px !important;
+        max-width: 1200px !important;
+    }
+    
+    /* Sidebar resize handle */
+    .sidebar-resize-handle {
+        position: absolute !important;
+        top: 0 !important;
+        right: 0 !important;
+        width: 8px !important;
+        height: 100% !important;
+        background: transparent !important;
+        cursor: col-resize !important;
+        z-index: 10000 !important;
+        transition: background 0.2s ease !important;
+        pointer-events: auto !important;
+    }
+    
+    .sidebar-resize-handle:hover {
+        background: rgba(124, 58, 237, 0.6) !important;
+        width: 8px !important;
+    }
+    
+    .sidebar-resize-handle.dragging {
+        background: rgba(124, 58, 237, 0.9) !important;
+        width: 8px !important;
+    }
+    
+    /* Visual indicator for resize handle */
+    .sidebar-resize-handle::before {
+        content: '';
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: 2px;
+        height: 40px;
+        background: rgba(124, 58, 237, 0.3);
+        border-radius: 1px;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+    }
+    
+    .sidebar-resize-handle:hover::before {
+        opacity: 1;
+    }
+    
+    /* Prevent text selection during resize */
+    body.resizing {
+        user-select: none !important;
+        cursor: col-resize !important;
+    }
+    
+    body.resizing * {
+        cursor: col-resize !important;
     }
     
     /* Sidebar content area - tighter spacing */
     section[data-testid="stSidebar"] > div {
         background: transparent !important;
-        padding: 12px 8px !important;
+        padding: 12px 16px !important;
+        overflow-x: visible !important;
+        overflow-y: auto !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+        min-width: 0 !important;
+    }
+    
+    /* Expander content - allow overflow detection */
+    section[data-testid="stSidebar"] [data-testid="stExpander"] {
+        overflow-x: visible !important;
+        width: 100% !important;
+    }
+    
+    /* Expander content area - maintain margins */
+    section[data-testid="stSidebar"] [data-testid="stExpanderContent"],
+    section[data-testid="stSidebar"] .streamlit-expanderContent {
+        padding: 8px 0 !important;
+        overflow-x: visible !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+    }
+    
+    /* Ensure all sidebar content respects margins */
+    section[data-testid="stSidebar"] * {
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+    }
+    
+    /* But allow tables and wide content to overflow for detection */
+    section[data-testid="stSidebar"] table,
+    section[data-testid="stSidebar"] .stDataFrame,
+    section[data-testid="stSidebar"] pre {
+        overflow-x: visible !important;
+        max-width: none !important;
     }
     
     /* Sidebar buttons - smaller, denser */
@@ -1660,14 +2676,13 @@ def get_ollama_status_safe():
 # Phase 1 & 6: Fixed Header Bar
 def render_header():
     """Render fixed top header bar with logo, controls, and menu."""
-    # Removed hamburger - using chevron buttons instead
-    col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
+    # Centered logo above everything
+    st.markdown('<div class="header-logo-centered">🧠 Powercore Mind</div>', unsafe_allow_html=True)
+    
+    # All controls in one horizontal row - adjusted widths to prevent button wrapping
+    col1, col2, col3, col4 = st.columns([2.5, 2, 2, 1.2])
     
     with col1:
-        # Logo - smaller and left-aligned (Issue 5)
-        st.markdown('<div class="header-logo">🧠 Powercore Mind</div>', unsafe_allow_html=True)
-    
-    with col3:
         # Project tag input
         project_tag = st.text_input(
             "Project Tag",
@@ -1678,7 +2693,7 @@ def render_header():
         )
         st.session_state.project_tag = project_tag
     
-    with col4:
+    with col2:
         # Model selector
         try:
             available_models = get_ollama_models()
@@ -1696,10 +2711,66 @@ def render_header():
             st.session_state.selected_model = selected_model
         except Exception as e:
             st.session_state.selected_model = config.OLLAMA_CHAT_MODEL
+    
+    with col3:
+        # Mode controls - compact inline
+        raw_mode = st.checkbox("☠️ Uncensored", value=st.session_state.raw_mode, 
+                              help="Bypass RAG entirely — pure uncensored model chat",
+                              key="header_raw_mode")
+        st.session_state.raw_mode = raw_mode
+    
+    with col4:
+        # INVENT LAW button - custom HTML/CSS for perfect height and alignment
+        st.markdown("""
+        <style>
+            .invent-law-btn {
+                height: 32px !important;
+                padding: 0 12px !important;
+                font-size: 13px !important;
+                font-weight: 600 !important;
+                line-height: 32px !important;
+                border-radius: 6px !important;
+                background: #FF375A !important;
+                color: white !important;
+                border: none !important;
+                cursor: pointer;
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                white-space: nowrap !important;
+                box-shadow: 0 2px 4px rgba(255, 55, 90, 0.3);
+                transition: all 0.2s ease;
+                font-family: inherit;
+            }
+            .invent-law-btn:hover {
+                background: #ff1f49 !important;
+                transform: translateY(-1px);
+                box-shadow: 0 4px 8px rgba(255, 55, 90, 0.4);
+            }
+            .invent-law-btn:active {
+                transform: translateY(0);
+            }
+            .invent-law-btn .icon {
+                font-size: 16px;
+                line-height: 1;
+            }
+        </style>
+        <div style="display: inline-block;">
+            <button class="invent-law-btn" onclick="
+                const url = new URL(window.location);
+                url.searchParams.set('invent_law', 'true');
+                window.location.href = url.toString();
+            ">
+                <span class="icon">⚡</span> INVENT LAW
+            </button>
+        </div>
+        """, unsafe_allow_html=True)
         
-        # INVENT LAW button
-        if st.button("⚡ INVENT LAW", type="primary", key="invent_law_button", use_container_width=True):
+        # Check for invent_law URL parameter and trigger action
+        if st.query_params.get("invent_law") == "true":
             st.session_state.show_invent_law = True
+            # Clear the parameter
+            st.query_params.clear()
             st.rerun()
     
     # INVENT LAW UI (shown when button clicked)
@@ -2124,11 +3195,10 @@ def render_rag_transparency():
 # NOW open the main container - AFTER sidebar is fully rendered
 st.markdown('<div class="main-container">', unsafe_allow_html=True)
 
-# When sidebar is collapsed, show expand chevron in main area
-if st.session_state.get("sidebar_collapsed", False):
-    st.markdown("""
-    <div class="main-chevron" onclick="toggleSidebarExpand()">⟩</div>
-    """, unsafe_allow_html=True)
+# Subtle expand button on left edge when collapsed (Claude/Grok style)
+st.markdown("""
+<div class="main-expand-toggle" onclick="if(window.toggleSidebarExpand){window.toggleSidebarExpand();}else{setTimeout(function(){if(window.toggleSidebarExpand)window.toggleSidebarExpand();},100);}">→</div>
+""", unsafe_allow_html=True)
 
 # Render header (after sidebar and container setup)
 render_header()
@@ -2146,20 +3216,19 @@ if st.session_state.current_page == "chat":
         error_message="Could not render RAG transparency"
     )
     
-    # Mode controls (moved from old chat tab)
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        raw_mode = st.checkbox("☠️ Uncensored Raw Mode", value=st.session_state.raw_mode, 
-                              help="Bypass RAG entirely — pure uncensored model chat")
-        st.session_state.raw_mode = raw_mode
-    with col2:
-        if not raw_mode:
+    # RAG threshold slider - compact inline (only show if not in raw mode)
+    if not st.session_state.raw_mode:
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            st.markdown('<div style="font-size: 0.85rem; color: rgba(255,255,255,0.7); padding-top: 0.5rem;">Threshold:</div>', unsafe_allow_html=True)
+        with col2:
             rag_threshold = st.slider("RAG relevance threshold", 0.0, 1.0, st.session_state.rag_threshold, 0.05,
-                                     help="Lower = more aggressive RAG, 0.0 = always use RAG")
+                                     help="Lower = more aggressive RAG, 0.0 = always use RAG",
+                                     label_visibility="collapsed",
+                                     key="rag_threshold_slider")
             st.session_state.rag_threshold = rag_threshold
-        else:
-            rag_threshold = 0.0
-            st.caption("Raw mode: RAG threshold disabled")
+    else:
+        rag_threshold = 0.0
     
     # Crystallize entire conversation button
     if st.session_state.chat_history:
@@ -2608,130 +3677,6 @@ elif st.session_state.current_page == "cognitive_ide":
         logger.error(f"Error rendering Cognitive IDE: {e}")
         st.error(f"Failed to load Cognitive IDE: {e}")
         st.info("Make sure all dependencies are installed: pip install pyyaml")
-
-elif st.session_state.current_page == "library":
-    # Library page (old Library tab content)
-    st.header("Library")
-    if backend_available:
-        view_mode = st.radio("View Mode", ["Chunks View", "Archive View"], horizontal=True, key="library_view_mode")
-        if st.button("Refresh Library"):
-            st.session_state.library_chunks_data = None
-            st.session_state.library_archive_data = None
-        
-        if view_mode == "Chunks View":
-            if "library_chunks_data" not in st.session_state:
-                try:
-                    st.session_state.library_chunks_data = get_chunks(limit=1000)
-                except Exception as e:
-                    logger.error(f"Error loading library chunks: {e}", exc_info=True)
-                    st.session_state.library_chunks_data = {"chunks": [], "total": 0, "sources": 0, "error": str(e)}
-            
-            data = st.session_state.library_chunks_data
-            if "error" in data:
-                st.error(f"Error loading library: {data['error']}")
-            else:
-                total_chunks = data.get("total", 0)
-                sources = data.get("sources", 0)
-                st.metric("Total Chunks", total_chunks)
-                st.metric("Source Documents", sources)
-                
-                if total_chunks == 0:
-                    st.info("No chunks found. Ingest some documents first!")
-                else:
-                    chunks_by_source = {}
-                    for chunk in data.get("chunks", []):
-                        source = chunk.get("source", "unknown")
-                        if source not in chunks_by_source:
-                            chunks_by_source[source] = []
-                        chunks_by_source[source].append(chunk)
-                    
-                    for source, chunks in chunks_by_source.items():
-                        filename = source.split("/")[-1] if "/" in source else source
-                        with st.expander(f"📄 {filename} ({len(chunks)} chunks)"):
-                            for chunk in chunks:
-                                chunk_idx = chunk.get("chunk_index", 0)
-                                text_preview = chunk.get("text_preview", "")
-                                text_length = chunk.get("text_length", 0)
-                                st.markdown(f"**Chunk {chunk_idx}** ({text_length} chars)")
-                                st.code(text_preview, language="markdown")
-                                st.markdown("---")
-        else:  # Archive View
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                search_term = st.text_input("Search archived files", key="archive_search", placeholder="Enter filename...")
-            with col2:
-                page_size = st.selectbox("Files per page", [10, 20, 50], index=1, key="archive_page_size")
-            
-            if "library_archive_page" not in st.session_state:
-                st.session_state.library_archive_page = 1
-            
-            archive_data = get_archived_documents(
-                page=st.session_state.library_archive_page,
-                search=search_term if search_term else None,
-                limit=page_size
-            )
-            
-            if "error" in archive_data:
-                st.error(f"Error loading archive: {archive_data['error']}")
-            else:
-                total_files = archive_data.get("total", 0)
-                files = archive_data.get("files", [])
-                pages = archive_data.get("pages", 1)
-                st.metric("Archived Files", total_files)
-                
-                if total_files == 0:
-                    st.info("No archived files found.")
-                else:
-                    if pages > 1:
-                        col1, col2, col3 = st.columns([1, 2, 1])
-                        with col1:
-                            if st.button("◀ Previous", disabled=st.session_state.library_archive_page <= 1):
-                                st.session_state.library_archive_page -= 1
-                                st.rerun()
-                        with col2:
-                            st.write(f"Page {st.session_state.library_archive_page} of {pages}")
-                        with col3:
-                            if st.button("Next ▶", disabled=st.session_state.library_archive_page >= pages):
-                                st.session_state.library_archive_page += 1
-                                st.rerun()
-                    
-                    for file_info in files:
-                        with st.container():
-                            col1, col2 = st.columns([4, 1])
-                            with col1:
-                                st.markdown(f"### 📄 {file_info['name']}")
-                                file_size_kb = file_info['size'] / 1024
-                                modified_date = file_info.get('modified', '')[:10] if file_info.get('modified') else 'Unknown'
-                                st.caption(f"Size: {file_size_kb:.1f} KB | Modified: {modified_date}")
-                                if file_info.get('ai_summary'):
-                                    st.info(f"**Summary:** {file_info['ai_summary']}")
-                                if file_info.get('ai_tags'):
-                                    tag_cols = st.columns(min(len(file_info['ai_tags']), 5))
-                                    for idx, tag in enumerate(file_info['ai_tags'][:5]):
-                                        with tag_cols[idx % 5]:
-                                            st.chip(tag)
-                                if file_info.get('preview'):
-                                    with st.expander("Preview"):
-                                        st.code(file_info['preview'], language="markdown")
-                            with col2:
-                                file_path = file_info['path']
-                                if st.button("📝 Open", key=f"open_{file_info['name']}"):
-                                    cursor_url = f"cursor://file/{os.path.abspath(file_path)}"
-                                    try:
-                                        webbrowser.open(cursor_url)
-                                        st.success("Opening...")
-                                    except Exception as e:
-                                        webbrowser.open(f"file://{os.path.dirname(os.path.abspath(file_path))}")
-                                if st.button("🔄 Re-ingest", key=f"reingest_{file_info['name']}"):
-                                    with st.spinner("Re-ingesting..."):
-                                        result = ingest_file(file_path)
-                                        if result.get("success"):
-                                            st.success("Re-ingested!")
-                                        else:
-                                            st.error(f"Failed: {result.get('message', 'Unknown error')}")
-                            st.divider()
-    else:
-        st.warning("Backend not available.")
 
 elif st.session_state.current_page == "ingest":
     # Ingest page (old Ingest tab content - simplified)

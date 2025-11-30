@@ -25,4 +25,6 @@ pydantic
 pyvis==0.3.2
 scikit-learn
 backoff
+streamlit-agraph
+pyyaml
 

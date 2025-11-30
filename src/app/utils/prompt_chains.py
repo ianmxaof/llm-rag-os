@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import List, Dict, Optional, Callable
 import logging
 
+# Import topological executor for non-linear chains
+try:
+    from src.app.utils.topological_executor import topological_execute, is_linear_chain
+    HAS_TOPOLOGICAL = True
+except ImportError:
+    HAS_TOPOLOGICAL = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,16 +65,19 @@ class PromptChain:
         chain_config: Dict,
         initial_input: str,
         llm_function: Callable,
-        debug_callback: Optional[Callable] = None
+        debug_callback: Optional[Callable] = None,
+        use_topological: Optional[bool] = None
     ) -> Dict:
         """
         Execute prompt chain with step-by-step debugging.
+        Supports both linear and non-linear (topological) execution.
         
         Args:
             chain_config: Chain definition from YAML
             initial_input: Starting input text
             llm_function: Function(prompt: str, temperature: float, rag_k: int) -> str
             debug_callback: Optional function(step_result: Dict) for UI updates
+            use_topological: If True, use topological executor. If None, auto-detect.
             
         Returns:
             Dict with:
@@ -83,12 +93,45 @@ class PromptChain:
             'error': None
         }
         
-        context = initial_input
-        
         steps = chain_config.get('steps', [])
         if not steps:
             results['error'] = "Chain has no steps defined"
             return results
+        
+        # Check if we should use topological execution
+        connections = chain_config.get('connections', [])
+        should_use_topological = False
+        
+        if use_topological is True:
+            should_use_topological = True
+        elif use_topological is None and HAS_TOPOLOGICAL:
+            # Auto-detect: use topological if connections exist and chain is non-linear
+            if connections:
+                should_use_topological = not is_linear_chain(connections, len(steps))
+        
+        # Use topological executor for non-linear chains
+        if should_use_topological and HAS_TOPOLOGICAL:
+            # Convert steps list to nodes dict
+            nodes_dict = {str(i): step for i, step in enumerate(steps)}
+            
+            # Convert connections to use string indices if needed
+            str_connections = []
+            for conn in connections:
+                if len(conn) == 2:
+                    from_idx = str(conn[0]) if isinstance(conn[0], str) else str(conn[0])
+                    to_idx = str(conn[1]) if isinstance(conn[1], str) else str(conn[1])
+                    str_connections.append([from_idx, to_idx])
+            
+            return topological_execute(
+                nodes_dict=nodes_dict,
+                connections=str_connections,
+                initial_context=initial_input,
+                llm_function=llm_function,
+                debug_callback=debug_callback
+            )
+        
+        # Linear execution (original implementation)
+        context = initial_input
         
         for idx, step in enumerate(steps):
             step_result = {
