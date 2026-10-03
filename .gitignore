@@ -119,3 +119,10 @@ cache/
 *.zip
 *.tar
 *.tar.gz
+
+# Agent checkpoints
+checkpoints/
+
+# Local personal dumps (not product source)
+_sidecar_out_of_vault/
+

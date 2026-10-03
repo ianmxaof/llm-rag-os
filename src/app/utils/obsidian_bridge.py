@@ -8,6 +8,7 @@ import os
 import hashlib
 import json
 import logging
+import urllib.parse
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -202,8 +203,7 @@ class ObsidianBridge:
         try:
             import webbrowser
             
-            # Get vault name from path
-            vault_name = self.vault_path.name
+            vault_name = (os.getenv("OBSIDIAN_VAULT_NAME") or "").strip() or self.vault_path.name
             
             # Convert to relative path from vault root
             if Path(source_path).is_absolute():
@@ -215,8 +215,11 @@ class ObsidianBridge:
             else:
                 rel_path = Path(source_path)
             
-            # Build Obsidian URI
-            uri = f"obsidian://open?vault={vault_name}&file={rel_path.as_posix()}"
+            uri = (
+                "obsidian://open?"
+                f"vault={urllib.parse.quote(vault_name)}"
+                f"&file={urllib.parse.quote(rel_path.as_posix())}"
+            )
             
             # Open URI
             webbrowser.open(uri)
@@ -423,9 +426,11 @@ _bridge = None
 def get_obsidian_bridge() -> ObsidianBridge:
     """Get or create Obsidian bridge instance"""
     global _bridge
-    if _bridge is None:
-        vault_path = os.getenv('OBSIDIAN_VAULT_PATH', './knowledge/notes')
-        _bridge = ObsidianBridge(vault_path)
+    from scripts.config import resolve_obsidian_vault_path
+
+    vault_path = resolve_obsidian_vault_path()
+    if _bridge is None or Path(_bridge.vault_path).resolve() != vault_path:
+        _bridge = ObsidianBridge(str(vault_path))
     return _bridge
 
 

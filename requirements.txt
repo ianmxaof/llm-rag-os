@@ -27,4 +27,7 @@ scikit-learn
 backoff
 streamlit-agraph
 pyyaml
+llama-cpp-python
+huggingface-hub
+mem0ai==0.1.22
 

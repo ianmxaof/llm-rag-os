@@ -42,7 +42,7 @@ from src.api_client import (
 )
 from src.crystallize import crystallize_turn, crystallize_conversation
 from scripts.chat_logger import ChatLogger
-from scripts.config import config
+from scripts.config import config, resolve_obsidian_vault_path
 import psutil
 
 # Import v2.0 utilities
@@ -50,6 +50,117 @@ from src.app.utils.rag_engine import get_rag_context, get_rag_context_cached, _c
 from src.app.utils.obsidian_bridge import get_related_notes, inject_note_context, crystallize_to_vault, open_in_obsidian, detect_vault_changes
 from src.app.utils.memory_store import get_memory_streams, load_conversation_by_id, store_conversation, mark_crystallized, search_conversations
 from typing import Callable, Any
+
+# === GLOBAL NAVIGATION STATE ===
+# Initialize navigation state early
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "chat"
+if "secondary_sidebar" not in st.session_state:
+    st.session_state.secondary_sidebar = None  # None or {"name": str, "title": str}
+
+def go_to_page(page: str):
+    """Navigate to a full page and close secondary sidebar."""
+    st.session_state.current_page = page
+    close_secondary()
+    st.rerun()
+
+def open_secondary(name: str, title: str):
+    """Open secondary sidebar with specified panel."""
+    st.session_state.secondary_sidebar = {"name": name, "title": title}
+    st.rerun()
+
+def close_secondary():
+    """Close secondary sidebar."""
+    st.session_state.secondary_sidebar = None
+    st.rerun()
+
+# Handle back arrow click from JS
+if st.query_params.get("component") == "close_secondary":
+    close_secondary()
+
+# === SESSION STATE INITIALIZATION - MUST BE BEFORE SECONDARY SIDEBAR ===
+# Initialize all session state variables BEFORE secondary sidebar renderer (line 1084)
+# This prevents AttributeError when render_chat_settings() accesses these variables
+
+# Core navigation and UI state
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "chat"
+if "project_tag" not in st.session_state:
+    st.session_state.project_tag = ""
+if "current_focus" not in st.session_state:
+    st.session_state.current_focus = "General"
+
+# Sidebar state
+if "sidebar_open" not in st.session_state:
+    st.session_state.sidebar_open = True
+if "sidebar_collapsed" not in st.session_state:
+    st.session_state.sidebar_collapsed = False
+
+# RAG and chat settings (used by render_chat_settings)
+if "top_k" not in st.session_state:
+    st.session_state.top_k = rag_utils.DEFAULT_K  # Default is 3
+if "show_context" not in st.session_state:
+    st.session_state.show_context = False
+if "raw_mode" not in st.session_state:
+    st.session_state.raw_mode = False
+if "rag_threshold" not in st.session_state:
+    st.session_state.rag_threshold = 0.25
+
+# Settings dict (used by various render functions)
+if "settings" not in st.session_state:
+    st.session_state.settings = {
+        'top_k': st.session_state.get('top_k', 3),
+        'relevance_threshold': st.session_state.get('rag_threshold', 0.25),
+        'auto_crystallize': False,
+        'uncensored_mode': st.session_state.get('raw_mode', False),
+        'auto_ingest_obsidian': st.session_state.get('auto_ingest_obsidian', True),
+        'manual_rag_tuning': False
+    }
+
+# V2.0 state variables (used by various render functions)
+if "related_notes" not in st.session_state:
+    st.session_state.related_notes = []
+if "current_thread" not in st.session_state:
+    st.session_state.current_thread = None
+if "memory_streams" not in st.session_state:
+    st.session_state.memory_streams = []
+if "rag_context" not in st.session_state:
+    st.session_state.rag_context = []
+
+# Powercore Vault state variables
+if "selected_model_path" not in st.session_state:
+    st.session_state.selected_model_path = None
+if "model_loader_type" not in st.session_state:
+    st.session_state.model_loader_type = "ollama"  # "gguf" or "ollama"
+if "loaded_model_instance" not in st.session_state:
+    st.session_state.loaded_model_instance = None
+if "vault_root" not in st.session_state:
+    from src.app.utils.vault_config import VAULT_ROOT_PATH, ensure_vault_structure
+    st.session_state.vault_root = str(VAULT_ROOT_PATH)
+    # Ensure vault structure exists
+    try:
+        ensure_vault_structure()
+    except Exception as e:
+        logger.warning(f"Could not initialize vault structure: {e}")
+
+# Initialize DPO worker for resonance evolution
+if "dpo_worker_started" not in st.session_state:
+    try:
+        from src.app.utils.dpo_worker import get_dpo_worker
+        dpo_worker = get_dpo_worker()
+        if not dpo_worker.running:
+            dpo_worker.start()
+        st.session_state.dpo_worker_started = True
+        logger.info("DPO worker initialized")
+    except Exception as e:
+        logger.warning(f"Could not initialize DPO worker: {e}")
+        st.session_state.dpo_worker_started = False
 
 # === FUNCTION DEFINITIONS (must be before sidebar) ===
 # === ATOMIC STATE UPDATE FUNCTION ===
@@ -525,6 +636,616 @@ def render_prompt_chain_executor():
         logger.error(f"Error rendering prompt chain executor: {e}")
         st.caption(f"Error: {e}")
 
+# === EXTRACTED PANEL FUNCTIONS FOR SECONDARY SIDEBAR ===
+
+def render_vault_tree():
+    """Render Obsidian Vault Browser."""
+    st.caption("Obsidian Vault Browser")
+    vault_path = resolve_obsidian_vault_path()
+    if vault_path.exists():
+        folders = safe_execute(
+            lambda: [d.name for d in vault_path.iterdir() if d.is_dir() and not d.name.startswith('.')],
+            fallback_value=[],
+            error_message="Could not list vault folders"
+        )
+        for folder in folders[:5]:
+            if st.checkbox(f"📁 {folder}", value=False):
+                st.markdown(f"- 📄 {folder} notes")
+    else:
+        st.caption("Vault not found")
+
+def render_documents_list():
+    """Render Documents tab with view modes."""
+    # Check backend availability
+    kb_backend_available = safe_execute(
+        lambda: check_backend_available(),
+        fallback_value=False,
+        error_message="Could not check backend availability"
+    )
+    
+    # Always show view modes, regardless of backend availability
+    view_mode = st.radio(
+        "View Mode", 
+        ["Recent Documents", "Chunks View", "Archive View"], 
+        horizontal=True, 
+        key="kb_documents_view_mode"
+    )
+    
+    # Show backend warning if unavailable
+    if not kb_backend_available:
+        st.warning("⚠️ Backend not available. Some features may be limited.")
+    
+    if view_mode == "Recent Documents":
+        st.caption("Ingested Documents")
+        
+        if kb_backend_available:
+            docs_result = safe_execute(
+                lambda: list_documents(),
+                fallback_value={"items": [], "total": 0},
+                error_message="Could not load documents"
+            )
+            # Handle both dict response and list response
+            if isinstance(docs_result, dict):
+                docs_list = docs_result.get("items", [])
+            elif isinstance(docs_result, list):
+                docs_list = docs_result
+            else:
+                docs_list = []
+            
+            if docs_list:
+                st.markdown("**Recent:**")
+                for doc in docs_list[:10]:
+                    # Handle both dict and string formats
+                    if isinstance(doc, dict):
+                        doc_name = doc.get('source_path', doc.get('name', 'Unknown'))
+                    else:
+                        doc_name = str(doc)
+                    st.markdown(f"- {doc_name}")
+            else:
+                st.caption("No documents ingested yet")
+        else:
+            st.info("Backend connection required to load documents.")
+        
+        if st.button("➕ Ingest New Document", use_container_width=True, disabled=not kb_backend_available):
+            st.info("Use the paperclip icon in the chat input to ingest files")
+        
+    elif view_mode == "Chunks View":
+        st.caption("Document Chunks")
+        
+        if kb_backend_available:
+            if st.button("🔄 Refresh", key="kb_refresh_chunks"):
+                if "kb_chunks_data" in st.session_state:
+                    del st.session_state.kb_chunks_data
+            
+            if "kb_chunks_data" not in st.session_state:
+                with st.spinner("Loading chunks..."):
+                    try:
+                        st.session_state.kb_chunks_data = safe_execute(
+                            lambda: get_chunks(limit=200),
+                            fallback_value={"chunks": [], "total": 0, "sources": 0},
+                            error_message="Could not load chunks"
+                        )
+                    except Exception as e:
+                        logger.error(f"Error loading chunks: {e}", exc_info=True)
+                        st.session_state.kb_chunks_data = {"chunks": [], "total": 0, "sources": 0, "error": str(e)}
+            
+            data = st.session_state.kb_chunks_data
+            if "error" in data:
+                st.error(f"Error: {data['error']}")
+            else:
+                total_chunks = data.get("total", 0)
+                sources = data.get("sources", 0)
+                st.caption(f"**{total_chunks}** chunks from **{sources}** documents")
+                
+                if total_chunks == 0:
+                    st.info("No chunks found. Ingest some documents first!")
+                else:
+                    # Group chunks by source document
+                    chunks_by_source = {}
+                    for chunk in data.get("chunks", []):
+                        source = chunk.get("source", "unknown")
+                        if source not in chunks_by_source:
+                            chunks_by_source[source] = []
+                        chunks_by_source[source].append(chunk)
+                    
+                    # Show top 5 sources
+                    for idx, (source, chunks) in enumerate(list(chunks_by_source.items())[:5]):
+                        filename = source.split("/")[-1] if "/" in source else source
+                        with st.expander(f"📄 {filename} ({len(chunks)} chunks)", expanded=False):
+                            # Show first 3 chunks per document
+                            for chunk in chunks[:3]:
+                                chunk_idx = chunk.get("chunk_index", 0)
+                                text_preview = chunk.get("text_preview", "")
+                                text_length = chunk.get("text_length", 0)
+                                st.markdown(f"**Chunk {chunk_idx}** ({text_length} chars)")
+                                st.code(text_preview[:200] + "..." if len(text_preview) > 200 else text_preview, language="markdown")
+                                st.markdown("---")
+                    
+                    if len(chunks_by_source) > 5:
+                        st.caption(f"... and {len(chunks_by_source) - 5} more documents")
+        else:
+            st.info("Backend connection required to load chunks.")
+    
+    else:  # Archive View
+        st.caption("Archived Documents")
+        
+        if kb_backend_available:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                search_term = st.text_input("Search", key="kb_archive_search", placeholder="Enter filename...")
+            with col2:
+                page_size = st.selectbox("Per page", [5, 10, 20], index=0, key="kb_archive_page_size")
+            
+            if "kb_archive_page" not in st.session_state:
+                st.session_state.kb_archive_page = 1
+            
+            archive_data = safe_execute(
+                lambda: get_archived_documents(
+                    page=st.session_state.kb_archive_page,
+                    search=search_term if search_term else None,
+                    limit=page_size
+                ),
+                fallback_value={"files": [], "total": 0, "pages": 1},
+                error_message="Could not load archive"
+            )
+            
+            if "error" in archive_data:
+                st.error(f"Error: {archive_data['error']}")
+            else:
+                total_files = archive_data.get("total", 0)
+                files = archive_data.get("files", [])
+                pages = archive_data.get("pages", 1)
+                st.caption(f"**{total_files}** archived files")
+                
+                if total_files == 0:
+                    st.info("No archived files found.")
+                else:
+                    if pages > 1:
+                        col1, col2, col3 = st.columns([1, 2, 1])
+                        with col1:
+                            if st.button("◀", disabled=st.session_state.kb_archive_page <= 1, key="kb_archive_prev"):
+                                st.session_state.kb_archive_page -= 1
+                                st.rerun()
+                        with col2:
+                            st.caption(f"Page {st.session_state.kb_archive_page} of {pages}")
+                        with col3:
+                            if st.button("▶", disabled=st.session_state.kb_archive_page >= pages, key="kb_archive_next"):
+                                st.session_state.kb_archive_page += 1
+                                st.rerun()
+                    
+                    for file_info in files:
+                        filename = file_info['name']
+                        file_path = file_info['path']
+                        
+                        with st.expander(f"📄 {filename}", expanded=False):
+                            file_size_kb = file_info['size'] / 1024
+                            modified_date = file_info.get('modified', '')[:10] if file_info.get('modified') else 'Unknown'
+                            st.caption(f"Size: {file_size_kb:.1f} KB | Modified: {modified_date}")
+                            
+                            if file_info.get('ai_summary'):
+                                st.info(f"**Summary:** {file_info['ai_summary']}")
+                            
+                            if file_info.get('ai_tags'):
+                                tag_cols = st.columns(min(len(file_info['ai_tags']), 3))
+                                for idx, tag in enumerate(file_info['ai_tags'][:3]):
+                                    with tag_cols[idx % 3]:
+                                        st.chip(tag)
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button("📝 Open", key=f"kb_open_{filename}", use_container_width=True):
+                                    cursor_url = f"cursor://file/{os.path.abspath(file_path)}"
+                                    try:
+                                        webbrowser.open(cursor_url)
+                                        st.success("Opening...")
+                                    except Exception as e:
+                                        webbrowser.open(f"file://{os.path.dirname(os.path.abspath(file_path))}")
+                            with col2:
+                                if st.button("🔄 Re-ingest", key=f"kb_reingest_{filename}", use_container_width=True, disabled=not kb_backend_available):
+                                    with st.spinner("Re-ingesting..."):
+                                        result = ingest_file(file_path)
+                                        if result.get("success"):
+                                            st.success("Re-ingested!")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Failed: {result.get('message', 'Unknown error')}")
+                            
+                            if file_info.get('preview'):
+                                with st.expander("Preview"):
+                                    st.code(file_info['preview'][:500] + "..." if len(file_info.get('preview', '')) > 500 else file_info.get('preview', ''), language="markdown")
+        else:
+            st.info("Backend connection required to load archived documents.")
+
+def render_knowledge_graph():
+    """Render Knowledge Graph view."""
+    st.markdown("""
+    <div style="background: rgba(15, 15, 15, 0.8); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 12px; margin: 8px 0; min-height: 120px; display: flex; align-items: center; justify-content: center; color: rgba(255, 255, 255, 0.4); font-size: 0.85rem;">
+        🌐 Graph View<br>
+        <small>Click to expand full graph</small>
+    </div>
+    """, unsafe_allow_html=True)
+
+def render_visualize_panel():
+    """Render Visualize panel - placeholder for now."""
+    st.info("Visualize panel - coming soon")
+
+def render_active_context_panel():
+    """Render Active Context panel."""
+    current_thread = st.session_state.get("current_thread")
+    if current_thread:
+        st.markdown(f"""
+        <div style="background: rgba(124, 58, 237, 0.15); border-left: 3px solid #7c3aed; padding: 12px; border-radius: 8px; margin-bottom: 12px;">
+            <strong>{current_thread.get('title', 'Untitled Thread')}</strong><br>
+            <small style="color: rgba(255,255,255,0.5);">
+                {current_thread.get('message_count', 0)} messages
+            </small>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.caption("No active thread. Start a new thought!")
+    
+    # Related Obsidian notes
+    chat_history = st.session_state.get("chat_history", [])
+    related = safe_execute(
+        lambda: get_related_notes(
+            " ".join([
+                m.get('question', m.get('content', '')) 
+                for m in chat_history[-3:]
+            ])
+            if chat_history else "",
+            top_k=5
+        ),
+        fallback_value=[],
+        error_message="Could not load related notes"
+    )
+    
+    if related:
+        st.caption("🔗 Connected Notes")
+        for note in related[:3]:
+            score_class = "relevance-high" if note['score'] >= 0.7 else ("relevance-medium" if note['score'] >= 0.4 else "relevance-low")
+            
+            with st.expander(f"📄 {note['title']} ({note['score']:.0%})", expanded=False):
+                # Show preview
+                note_content = safe_execute(
+                    lambda: inject_note_context(note['source']),
+                    fallback_value=None,
+                    error_message="Could not load note"
+                )
+                
+                if note_content:
+                    preview = note_content[:300] + "..." if len(note_content) > 300 else note_content
+                    st.caption("Preview:")
+                    st.markdown(preview)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if st.button("💉 Inject", key=f"inject_{note['id']}", use_container_width=True):
+                            # Add to conversation context
+                            injected_msg = {
+                                'role': 'system',
+                                'content': f"[Context injected from {note['title']}]\n\n{note_content}",
+                                'metadata': {'type': 'injected_context', 'source': note['source']}
+                            }
+                            # Store in session state for next message
+                            if 'injected_contexts' not in st.session_state:
+                                st.session_state.injected_contexts = []
+                            st.session_state.injected_contexts.append(injected_msg)
+                            st.success(f"✓ Injected {note['title']}")
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("🔗 Open", key=f"open_{note['id']}", use_container_width=True):
+                            open_in_obsidian(note['source'])
+                            st.info("Opening in Obsidian...")
+                    
+                    with col3:
+                        if st.button("📋 Copy", key=f"copy_{note['id']}", use_container_width=True):
+                            st.code(note_content, language="markdown")
+                else:
+                    st.caption("Note content not available")
+
+def render_memory_streams_panel():
+    """Render Memory Streams panel."""
+    streams = safe_execute(
+        lambda: get_memory_streams(),
+        fallback_value=[],
+        error_message="Could not load memory streams"
+    )
+    
+    # Group by category
+    today = [s for s in streams if s.get('category') == 'today']
+    week = [s for s in streams if s.get('category') == 'week']
+    
+    if today:
+        st.caption("Today")
+        for stream in today:
+            st.markdown(f"""
+            <div style="padding: 8px 12px; border-radius: 8px; margin: 4px 0; cursor: pointer; background: rgba(30, 30, 30, 0.4); border-left: 2px solid #00ff88;">
+                <strong>{stream['title']}</strong><br>
+                <small style="color: rgba(255,255,255,0.5);">
+                    {stream.get('message_count', 0)} messages
+                </small>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("Load", key=f"load_{stream['id']}", use_container_width=True):
+                load_conversation(stream['id'])
+    
+    if week:
+        st.caption("This Week")
+        for stream in week:
+            st.markdown(f"""
+            <div style="padding: 8px 12px; border-radius: 8px; margin: 4px 0; cursor: pointer; background: rgba(30, 30, 30, 0.4);">
+                <strong>{stream['title']}</strong><br>
+                <small style="color: rgba(255,255,255,0.5);">
+                    {stream.get('message_count', 0)} messages
+                </small>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("Load", key=f"load_{stream['id']}", use_container_width=True):
+                load_conversation(stream['id'])
+
+def render_ingest_panel():
+    """Render Ingest panel - placeholder for now."""
+    st.info("Ingest panel - coming soon")
+    # TODO: Extract ingest UI from ingest page
+
+def render_system_settings_panel():
+    """Render System Settings panel."""
+    st.caption("Interaction Preferences")
+    
+    # Ensure settings exists
+    if "settings" not in st.session_state:
+        st.session_state.settings = {}
+    
+    auto_crystallize = st.toggle(
+        "Auto-Crystallize Insights",
+        value=st.session_state.settings.get('auto_crystallize', False),
+        key="auto_crystallize_toggle",
+        help="Automatically save valuable insights to Obsidian"
+    )
+    st.session_state.settings['auto_crystallize'] = auto_crystallize
+    
+    uncensored_mode = st.toggle(
+        "Uncensored Raw Mode",
+        value=st.session_state.settings.get('uncensored_mode', False),
+        key="uncensored_mode_toggle",
+        help="Disable content filters (use responsibly)"
+    )
+    st.session_state.settings['uncensored_mode'] = uncensored_mode
+    st.session_state.raw_mode = uncensored_mode
+    
+    # Advanced RAG tuning
+    st.markdown("---")
+    manual_tuning = st.checkbox(
+        "Manual RAG Tuning",
+        value=st.session_state.settings.get('manual_rag_tuning', False),
+        help="Override automatic RAG parameter optimization"
+    )
+    st.session_state.settings['manual_rag_tuning'] = manual_tuning
+    
+    if manual_tuning:
+        st.caption("⚠️ System auto-tunes these. Override only if needed.")
+        top_k_slider = st.slider(
+            "Context Chunks (Top-K)",
+            min_value=1,
+            max_value=20,
+            value=st.session_state.settings.get('top_k', 8),
+            key="top_k_slider",
+            help="Number of context chunks to retrieve"
+        )
+        st.session_state.settings['top_k'] = top_k_slider
+        st.session_state.top_k = top_k_slider
+        
+        relevance_slider = st.slider(
+            "Relevance Threshold",
+            min_value=0.0,
+            max_value=1.0,
+            value=st.session_state.settings.get('relevance_threshold', 0.25),
+            step=0.05,
+            key="relevance_slider",
+            help="Minimum similarity score for retrieval"
+        )
+        st.session_state.settings['relevance_threshold'] = relevance_slider
+        st.session_state.rag_threshold = relevance_slider
+
+def render_session_sync_panel():
+    """Render Session & Sync panel."""
+    # Session Context
+    st.caption("Current Focus")
+    current_focus_value = st.session_state.get("current_focus", "General")
+    current_focus = st.selectbox(
+        "What are you working on?",
+        ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"],
+        index=["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"].index(
+            current_focus_value
+        ) if current_focus_value in ["Researching", "Building", "Reflecting", "Planning", "Debugging", "General"] else 0,
+        key="sidebar_current_focus",
+        help="What are you working on right now?"
+    )
+    st.session_state.current_focus = current_focus
+    
+    st.markdown("---")
+    
+    # Basic Settings
+    st.caption("Display Preferences")
+    show_context = st.checkbox("Show retrieved context", value=st.session_state.get("show_context", False), key="sidebar_show_context")
+    st.session_state.show_context = show_context
+    
+    st.markdown("---")
+    
+    # Obsidian Sync
+    st.caption("Obsidian Integration")
+    auto_ingest_obsidian = st.checkbox(
+        "Auto-ingest Obsidian notes",
+        value=st.session_state.get("auto_ingest_obsidian", True),
+        key="sidebar_auto_ingest",
+        help="Automatically ingest new/modified notes from knowledge/notes/ folder"
+    )
+    st.session_state.auto_ingest_obsidian = auto_ingest_obsidian
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        try:
+            watcher_status_response = requests.get(f"{API_BASE}/ingest/watch/status", timeout=2)
+            if watcher_status_response.status_code == 200:
+                watcher_status = watcher_status_response.json().get("notes_watcher", "unknown")
+                if watcher_status == "running":
+                    st.success("✅ Running")
+                else:
+                    st.warning(f"⚠️ {watcher_status}")
+            else:
+                st.info("Unknown")
+        except Exception:
+            st.info("Unknown")
+    
+    with col2:
+        col_start, col_stop = st.columns(2)
+        with col_start:
+            if st.button("▶", key="sidebar_start_watcher"):
+                try:
+                    response = requests.post(f"{API_BASE}/ingest/watch/notes/start", timeout=5)
+                    if response.status_code == 200:
+                        st.success("Started")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+        with col_stop:
+            if st.button("⏸", key="sidebar_stop_watcher"):
+                try:
+                    response = requests.post(f"{API_BASE}/ingest/watch/notes/stop", timeout=5)
+                    if response.status_code == 200:
+                        st.success("Stopped")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+def render_chat_settings():
+    """Render Chat Settings panel."""
+    st.subheader("Chat Settings")
+    top_k = st.slider("Top-K context chunks", min_value=1, max_value=10, 
+                      value=st.session_state.get('top_k', rag_utils.DEFAULT_K))
+    st.session_state.top_k = top_k
+    show_context = st.checkbox("Show retrieved context", 
+                               value=st.session_state.get('show_context', False))
+    st.session_state.show_context = show_context
+    
+    st.subheader("Model Settings")
+    
+    # Vault info
+    from src.app.utils.vault_config import VAULT_ROOT_PATH
+    st.caption(f"Vault: {VAULT_ROOT_PATH}")
+    
+    # Current model info
+    selected_model = st.session_state.get("selected_model", config.OLLAMA_CHAT_MODEL)
+    model_loader_type = st.session_state.get("model_loader_type", "ollama")
+    selected_model_path = st.session_state.get("selected_model_path")
+    
+    st.code(f"Chat model: {selected_model}")
+    if selected_model_path:
+        st.code(f"Model path: {selected_model_path}")
+        st.code(f"Loader: {model_loader_type.upper()}")
+        
+        # Show model metadata if available
+        try:
+            from src.app.utils.model_registry import get_model_registry
+            from src.app.utils.vault_paths import get_model_metadata, format_file_size
+            
+            if model_loader_type == "gguf":
+                metadata = get_model_metadata(selected_model_path)
+                if metadata.get("exists"):
+                    st.caption(f"Size: {format_file_size(metadata.get('file_size', 0))}")
+                    if "quantization" in metadata:
+                        st.caption(f"Quantization: {metadata['quantization']}")
+                    if "size" in metadata:
+                        st.caption(f"Model size: {metadata['size']}")
+        except Exception as e:
+            logger.debug(f"Could not load model metadata: {e}")
+    
+    st.code(f"Embedding model: {config.OLLAMA_EMBED_MODEL}")
+    st.code(f"Ollama API: {config.OLLAMA_API_BASE}")
+    
+    # Model reload button
+    if st.button("🔄 Reload Model", use_container_width=True):
+        try:
+            from src.app.utils.model_loader import unload_model
+            unload_model()
+            st.success("Model unloaded. Will reload on next use.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error reloading model: {e}")
+
+def render_prompts_library_panel():
+    """Render Prompts Library panel."""
+    st.caption("Quick Templates")
+    # TODO: Query prompts from API if available
+    prompts = [
+        "Analyze and synthesize...",
+        "Extract key insights from...",
+        "Compare and contrast...",
+        "Crystallize this conversation"
+    ]
+    
+    for prompt in prompts:
+        if st.button(prompt, key=f"prompt_{prompt[:10]}", use_container_width=True):
+            st.session_state.prompt_template = prompt
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # Semantic Prompt Discovery
+    suggest_prompts_for_context()
+    
+    st.markdown("---")
+    
+    # Prompt Chain Executor
+    render_prompt_chain_executor()
+
+# ============================================================================
+# ⚠️ CRITICAL: SECONDARY SIDEBAR RENDERER - MUST BE HERE, BEFORE ROUTING
+# ============================================================================
+# This intercepts the render cycle and stops everything else from rendering
+# when secondary sidebar is open. This is the ONLY pattern that works.
+# ============================================================================
+if st.session_state.get("secondary_sidebar"):
+    panel = st.session_state.secondary_sidebar
+    
+    # Render secondary sidebar HTML structure
+    st.markdown(f"""
+    <div class="secondary-sidebar open">
+        <div class="back-arrow" onclick="window.parent.location.href='?component=close_secondary'">←</div>
+        <h2 style="margin:0 0 32px 24px;color:white;font-size:24px;font-weight:600;">{panel['title']}</h2>
+        <div style="padding:0 24px;">
+    """, unsafe_allow_html=True)
+    
+    # Render panel content based on type
+    panel_name = panel.get("name", "")
+    
+    if panel_name == "settings":
+        selected = st.radio("Section", ["Chat Settings", "System", "Session & Sync"], horizontal=True, label_visibility="collapsed")
+        if selected == "Chat Settings":
+            render_chat_settings()
+        elif selected == "System":
+            render_system_settings_panel()
+        else:
+            render_session_sync_panel()
+    elif panel_name == "ingest":
+        render_ingest_panel()
+    elif panel_name == "active_context":
+        render_active_context_panel()
+    elif panel_name == "memory_streams":
+        render_memory_streams_panel()
+    elif panel_name == "prompts_library":
+        render_prompts_library_panel()
+    
+    # Close secondary sidebar div
+    st.markdown("</div></div>", unsafe_allow_html=True)
+    st.markdown('<script>document.body.classList.add("secondary-open")</script>', unsafe_allow_html=True)
+    
+    # ⚠️ CRITICAL: Stop all other rendering
+    # This prevents the old settings page and all other content from rendering
+    st.stop()
+
 # Phase 1: Collapsible Sidebar - Claude/Grok Style
 def render_sidebar_content():
     """Render sidebar expanders and additional content."""
@@ -615,7 +1336,7 @@ def render_sidebar_content():
         
         with tab1:
             st.caption("Obsidian Vault Browser")
-            vault_path = Path("./knowledge/notes")
+            vault_path = resolve_obsidian_vault_path()
             if vault_path.exists():
                 folders = safe_execute(
                     lambda: [d.name for d in vault_path.iterdir() if d.is_dir() and not d.name.startswith('.')],
@@ -888,6 +1609,49 @@ def render_sidebar_content():
         if "settings" not in st.session_state:
             st.session_state.settings = {}
         
+        # Ethical Continuum Slider
+        st.markdown("---")
+        st.subheader("⚡ Ethical Continuum")
+        ethical_mode = st.slider(
+            "Guardrail Strength",
+            min_value=0.00,
+            max_value=1.00,
+            value=st.session_state.get("ethical_mode", 0.00),
+            step=0.05,
+            help="0.00 = raw uncensored abyss | 1.00 = maximum therapeutic containment"
+        )
+        st.session_state.ethical_mode = ethical_mode
+        
+        # Mode label
+        if ethical_mode < 0.33:
+            mode_label = "Raw Chaos"
+            mode_color = "#ff4400"
+        elif ethical_mode < 0.66:
+            mode_label = "Balanced Truth"
+            mode_color = "#ffaa00"
+        else:
+            mode_label = "Compassionate Guardian"
+            mode_color = "#00ff88"
+        
+        st.caption(f"Current mode: **{mode_label}**")
+        
+        # Quick presets
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("🧨 Raw", key="eth_raw", use_container_width=True):
+                st.session_state.ethical_mode = 0.00
+                st.rerun()
+        with col2:
+            if st.button("⚔️ Balanced", key="eth_balanced", use_container_width=True):
+                st.session_state.ethical_mode = 0.50
+                st.rerun()
+        with col3:
+            if st.button("🕊️ Guardian", key="eth_guardian", use_container_width=True):
+                st.session_state.ethical_mode = 1.00
+                st.rerun()
+        
+        st.markdown("---")
+        
         auto_crystallize = st.toggle(
             "Auto-Crystallize Insights",
             value=st.session_state.settings.get('auto_crystallize', False),
@@ -1063,62 +1827,104 @@ st.set_page_config(
 # === SIDEBAR MUST BE RENDERED IMMEDIATELY AFTER set_page_config ===
 # In Streamlit v1.38+ with layout="centered", ANY st. command before sidebar kills it
 with st.sidebar:
-    # Set sidebar width from session state (for JavaScript to read)
-    sidebar_width = st.session_state.get("sidebar_width", 280)
-    st.markdown(f'<div data-sidebar-width="{sidebar_width}" style="display:none;"></div>', unsafe_allow_html=True)
+    st.markdown("<div style='padding:16px 20px 8px;color:#666;font-size:11px;text-transform:uppercase;letter-spacing:1px;'>Navigation</div>", unsafe_allow_html=True)
     
-    # New Chat pill - Grok.com style
-    st.markdown("""
-    <button class="new-chat-btn" onclick="
-        const url = new URL(window.location);
-        url.searchParams.set('new_chat', 'true');
-        window.location.href = url.toString();
-    ">
-        New Chat
-    </button>
-    """, unsafe_allow_html=True)
-    
-    # Check for new_chat URL parameter
-    if st.query_params.get("new_chat") == "true":
+    # New Chat button
+    if st.button("New Chat", key="new_chat", use_container_width=True):
         st.session_state.chat_history = []
         st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-        params = dict(st.query_params)
-        params.pop("new_chat", None)
-        st.query_params.clear()
-        for key, value in params.items():
-            st.query_params[key] = value
         st.rerun()
     
-    # Navigation items — tight, left-aligned (Grok.com style)
-    nav_items = [
-        ("Chat", "chat"),
-        ("Cognitive IDE", "cognitive_ide"),
-        ("Ingest", "ingest"),
-        ("Visualize", "visualize"),
-        ("Graph", "graph"),
-        ("Settings", "settings"),
-        ("Prompts", "prompts")
-    ]
+    st.markdown("---")
     
-    current_page = st.session_state.get("current_page", "chat")
-    for label, page_key in nav_items:
-        is_active = page_key == current_page
-        # Add custom HTML to mark active button
-        if is_active:
-            st.markdown(f"""
-            <script>
-                setTimeout(function() {{
-                    const btn = document.querySelector('button[data-testid="nav_{page_key}"]');
-                    if (btn) btn.classList.add('active-page');
-                }}, 100);
-            </script>
-            """, unsafe_allow_html=True)
-        if st.button(label, key=f"nav_{page_key}", use_container_width=True, type="secondary"):
-            st.session_state.current_page = page_key
-            st.rerun()
+    # ========================================================================
+    # NAVIGATION BUTTONS - These change pages (close secondary)
+    # ========================================================================
     
-    # Render the rest of sidebar content (expanders, etc.) - no divider
-    render_sidebar_content()
+    if st.button("Chat", key="nav_chat", use_container_width=True):
+        st.session_state.current_page = "chat"
+        st.session_state.secondary_sidebar = None  # Close secondary
+        st.rerun()
+    
+    if st.button("Cognitive IDE", key="nav_ide", use_container_width=True):
+        st.session_state.current_page = "cognitive_ide"
+        st.session_state.secondary_sidebar = None  # Close secondary
+        st.rerun()
+    
+    if st.button("Knowledge Base", key="nav_kb", use_container_width=True):
+        st.session_state.current_page = "knowledge_base"
+        st.session_state.secondary_sidebar = None  # Close secondary
+        st.rerun()
+    
+    if st.button("Temporal Vault", key="nav_temporal", use_container_width=True):
+        st.session_state.current_page = "temporal_vault"
+        st.session_state.secondary_sidebar = None  # Close secondary
+        st.rerun()
+    
+    st.markdown("---")
+    
+    # ========================================================================
+    # SECONDARY SIDEBAR BUTTONS - These open panels (keep on same page)
+    # ========================================================================
+    
+    if st.button("Active Context", key="secondary_context", use_container_width=True):
+        st.session_state.secondary_sidebar = {
+            "name": "active_context",
+            "title": "Active Context"
+        }
+        # Don't change current_page
+        st.rerun()
+    
+    if st.button("Memory Streams", key="secondary_memory", use_container_width=True):
+        st.session_state.secondary_sidebar = {
+            "name": "memory_streams",
+            "title": "Memory Streams"
+        }
+        st.rerun()
+    
+    if st.button("Ingest", key="secondary_ingest", use_container_width=True):
+        st.session_state.secondary_sidebar = {
+            "name": "ingest",
+            "title": "Ingest"
+        }
+        st.rerun()
+    
+    if st.button("Settings", key="secondary_settings", use_container_width=True):
+        st.session_state.secondary_sidebar = {
+            "name": "settings",
+            "title": "Settings"
+        }
+        # CRITICAL: Do NOT set current_page to "settings"
+        # The secondary sidebar will handle rendering
+        st.rerun()
+    
+    st.markdown("---")
+    
+    # Debug info (temporary - remove once everything works)
+    if st.session_state.get("secondary_sidebar"):
+        panel_name = st.session_state.secondary_sidebar.get("name", "")
+        st.caption(f"📌 Panel: {panel_name}")
+    
+    active_page = st.session_state.current_page
+    st.caption(f"Page: {active_page}")
+    
+    # Mark active page button with data-active attribute
+    st.markdown(f"""
+    <script>
+        setTimeout(function() {{
+            const activePage = '{active_page}';
+            const buttons = document.querySelectorAll('section[data-testid="stSidebar"] button[data-testid^="nav_"]');
+            buttons.forEach(function(btn) {{
+                const pageKey = btn.getAttribute('data-testid').replace('nav_', '');
+                if (pageKey === activePage) {{
+                    btn.setAttribute('data-active', 'true');
+                }} else {{
+                    btn.removeAttribute('data-active');
+                }}
+            }});
+        }}, 100);
+    </script>
+    """, unsafe_allow_html=True)
 
 # === NOW inject global CSS and JavaScript AFTER sidebar ===
 # === HIDDEN JS ENGINE — DO NOT DELETE ===
@@ -1337,413 +2143,9 @@ components.html("""
     // Run after DOM loads and on reruns
     setTimeout(markActiveSidebarButton, 300);
     setInterval(markActiveSidebarButton, 1000);
-    
-    // Sidebar resize functionality
-    function initSidebarResize() {
-        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
-        if (!sidebar) return;
-        
-        // Check if resize handle already exists
-        let resizeHandle = sidebar.querySelector('.sidebar-resize-handle');
-        if (!resizeHandle) {
-            resizeHandle = document.createElement('div');
-            resizeHandle.className = 'sidebar-resize-handle';
-            resizeHandle.setAttribute('data-testid', 'sidebar-resize-handle');
-            sidebar.appendChild(resizeHandle);
-        }
-        
-        // Ensure it's visible and positioned correctly
-        resizeHandle.style.display = 'block';
-        resizeHandle.style.position = 'absolute';
-        resizeHandle.style.top = '0';
-        resizeHandle.style.right = '0';
-        resizeHandle.style.width = '8px';
-        resizeHandle.style.height = '100%';
-        resizeHandle.style.zIndex = '10000';
-        resizeHandle.style.pointerEvents = 'auto';
-        resizeHandle.style.cursor = 'col-resize';
-        
-        let isResizing = false;
-        let startX = 0;
-        let startWidth = 0;
-        const minWidth = 200;
-        const maxWidth = 1200;
-        
-        // Get initial width from data attribute (set by Python), localStorage, or use current width
-        let currentWidth = sidebar.offsetWidth || 280;
-        
-        // Try to get width from data attribute (set by Python in sidebar)
-        const dataWidthElement = document.querySelector('[data-sidebar-width]');
-        if (dataWidthElement) {
-            const dataWidth = dataWidthElement.getAttribute('data-sidebar-width');
-            if (dataWidth) {
-                const width = parseInt(dataWidth);
-                if (width >= minWidth && width <= maxWidth) {
-                    currentWidth = width;
-                }
-            }
-        }
-        
-        // Fallback to localStorage if data attribute not found
-        if (currentWidth === (sidebar.offsetWidth || 280)) {
-            const savedWidth = localStorage.getItem('sidebar_width');
-            if (savedWidth) {
-                const width = parseInt(savedWidth);
-                if (width >= minWidth && width <= maxWidth) {
-                    currentWidth = width;
-                }
-            }
-        }
-        
-        // Set initial width
-        sidebar.style.width = currentWidth + 'px';
-        sidebar.style.flexShrink = '0';
-        sidebar.style.flexGrow = '0';
-        
-        let savedScrollTop = 0;
-        let scrollLocked = false;
-        
-        resizeHandle.addEventListener('mousedown', function(e) {
-            // Prevent any default behavior that might cause scrolling
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            
-            isResizing = true;
-            startX = e.clientX;
-            startWidth = sidebar.offsetWidth;
-            
-            // Save current scroll position BEFORE any changes
-            const sidebarContent = sidebar.querySelector('div[style*="overflow"]') || 
-                                   sidebar.querySelector('div') || 
-                                   sidebar;
-            savedScrollTop = sidebarContent.scrollTop || 0;
-            scrollLocked = true;
-            
-            // Lock scroll position immediately
-            sidebar.style.overflowY = 'hidden';
-            sidebar.style.overflowX = 'hidden';
-            document.body.style.overflow = 'hidden';
-            document.body.classList.add('resizing');
-            resizeHandle.classList.add('dragging');
-            document.body.style.userSelect = 'none';
-            
-            // Force scroll position to stay
-            if (sidebarContent) {
-                sidebarContent.scrollTop = savedScrollTop;
-            }
-        });
-        
-        document.addEventListener('mousemove', function(e) {
-            if (!isResizing) return;
-            
-            // Prevent scroll during resize
-            e.preventDefault();
-            
-            const diff = e.clientX - startX;
-            let newWidth = startWidth + diff;
-            
-            // Enforce min/max constraints
-            if (newWidth < minWidth) newWidth = minWidth;
-            if (newWidth > maxWidth) newWidth = maxWidth;
-            
-            sidebar.style.width = newWidth + 'px';
-            currentWidth = newWidth;
-            
-            // Maintain scroll position
-            if (scrollLocked) {
-                const sidebarContent = sidebar.querySelector('div[style*="overflow"]') || sidebar;
-                if (sidebarContent) {
-                    sidebarContent.scrollTop = savedScrollTop;
-                }
-            }
-        });
-        
-        document.addEventListener('mouseup', function(e) {
-            if (isResizing) {
-                isResizing = false;
-                scrollLocked = false;
-                
-                // Restore scroll behavior
-                sidebar.style.overflowY = '';
-                sidebar.style.overflowX = '';
-                document.body.style.overflow = '';
-                document.body.classList.remove('resizing');
-                resizeHandle.classList.remove('dragging');
-                document.body.style.userSelect = '';
-                
-                // Restore scroll position
-                const sidebarContent = sidebar.querySelector('div[style*="overflow"]') || 
-                                       sidebar.querySelector('div') || 
-                                       sidebar;
-                if (sidebarContent && savedScrollTop >= 0) {
-                    sidebarContent.scrollTop = savedScrollTop;
-                }
-                
-                // Store width in localStorage for persistence
-                localStorage.setItem('sidebar_width', currentWidth.toString());
-                
-                // Update data attribute so Python can read it
-                sidebar.setAttribute('data-width', currentWidth.toString());
-            }
-        });
-        
-        // Width loading is handled above in initialization
-    }
-    
-    // Check sidebar content for overflow and calculate required width
-    function checkSidebarOverflow() {
-        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
-        if (!sidebar) return null;
-        
-        // Find all expanded expanders
-        const expanders = sidebar.querySelectorAll('[data-testid="stExpander"]');
-        let maxRequiredWidth = 0;
-        const margin = 32; // 16px padding on each side
-        
-        expanders.forEach(function(expander) {
-            // Check if expander is expanded (aria-expanded="true")
-            const isExpanded = expander.getAttribute('aria-expanded') === 'true';
-            if (!isExpanded) return;
-            
-            // Find the content area of the expander
-            const contentArea = expander.querySelector('[data-testid="stExpanderContent"]') || 
-                               expander.querySelector('.streamlit-expanderContent') ||
-                               expander;
-            
-            // Check for overflow
-            if (contentArea.scrollWidth > contentArea.clientWidth) {
-                // Content is overflowing
-                const requiredWidth = contentArea.scrollWidth + margin;
-                if (requiredWidth > maxRequiredWidth) {
-                    maxRequiredWidth = requiredWidth;
-                }
-            }
-            
-            // Also check all child elements for overflow
-            const childElements = contentArea.querySelectorAll('*');
-            childElements.forEach(function(element) {
-                if (element.scrollWidth > element.clientWidth) {
-                    const elementWidth = element.scrollWidth + margin;
-                    // Get the element's position relative to sidebar
-                    const rect = element.getBoundingClientRect();
-                    const sidebarRect = sidebar.getBoundingClientRect();
-                    const elementRight = rect.right - sidebarRect.left;
-                    const requiredWidth = elementRight + margin;
-                    if (requiredWidth > maxRequiredWidth) {
-                        maxRequiredWidth = requiredWidth;
-                    }
-                }
-            });
-        });
-        
-        // Also check sidebar content container itself
-        const sidebarContent = sidebar.querySelector('div[style*="padding"]') || sidebar;
-        if (sidebarContent.scrollWidth > sidebarContent.clientWidth) {
-            const requiredWidth = sidebarContent.scrollWidth + margin;
-            if (requiredWidth > maxRequiredWidth) {
-                maxRequiredWidth = requiredWidth;
-            }
-        }
-        
-        return maxRequiredWidth > 0 ? Math.ceil(maxRequiredWidth) : null;
-    }
-    
-    // Auto-expand sidebar to fit overflowing content
-    function autoExpandSidebar() {
-        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
-        if (!sidebar) return;
-        
-        const requiredWidth = checkSidebarOverflow();
-        if (!requiredWidth) return;
-        
-        const minWidth = 200;
-        const maxWidth = 1200;
-        const currentWidth = sidebar.offsetWidth || 280;
-        
-        // Only expand if required width is greater than current width
-        if (requiredWidth > currentWidth) {
-            // Respect max width constraint
-            let newWidth = Math.min(requiredWidth, maxWidth);
-            
-            // Smoothly expand sidebar
-            sidebar.style.transition = 'width 0.3s ease';
-            sidebar.style.width = newWidth + 'px';
-            
-            // Update stored width
-            localStorage.setItem('sidebar_width', newWidth.toString());
-            sidebar.setAttribute('data-width', newWidth.toString());
-            
-            // Remove transition after animation completes
-            setTimeout(function() {
-                sidebar.style.transition = '';
-            }, 300);
-        }
-    }
-    
-    // Initialize resize handle when sidebar is ready
-    function initSidebarResizeWhenReady() {
-        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
-        if (sidebar && sidebar.offsetWidth > 0) {
-            initSidebarResize();
-        } else {
-            setTimeout(initSidebarResizeWhenReady, 100);
-        }
-    }
-    
-    // Start initialization
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function() {
-            setTimeout(initSidebarResizeWhenReady, 500);
-        });
-    } else {
-        setTimeout(initSidebarResizeWhenReady, 500);
-    }
-    
-    // Also reinitialize after Streamlit reruns
-    const resizeObserver = new MutationObserver(function(mutations) {
-        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
-        if (sidebar && !sidebar.querySelector('.sidebar-resize-handle')) {
-            initSidebarResizeWhenReady();
-        }
-    });
-    
-    resizeObserver.observe(document.body, {
-        childList: true,
-        subtree: true
-    });
-    
-    // Monitor expander state changes for auto-expand
-    function initExpanderObserver() {
-        const sidebar = document.querySelector('section[data-testid="stSidebar"]');
-        if (!sidebar) {
-            setTimeout(initExpanderObserver, 500);
-            return;
-        }
-        
-        // Check for overflow on initial load
-        setTimeout(function() {
-            autoExpandSidebar();
-        }, 500);
-        
-        // Watch for expander state changes
-        const expanderObserver = new MutationObserver(function(mutations) {
-            let shouldCheck = false;
-            
-            mutations.forEach(function(mutation) {
-                // Check if aria-expanded attribute changed
-                if (mutation.type === 'attributes' && mutation.attributeName === 'aria-expanded') {
-                    shouldCheck = true;
-                }
-                // Check if expander content was added/removed
-                if (mutation.type === 'childList') {
-                    const target = mutation.target;
-                    if (target.hasAttribute && target.hasAttribute('data-testid') && 
-                        target.getAttribute('data-testid') === 'stExpander') {
-                        shouldCheck = true;
-                    }
-                    // Check if any added nodes are expanders
-                    mutation.addedNodes.forEach(function(node) {
-                        if (node.nodeType === 1 && node.hasAttribute && 
-                            node.getAttribute('data-testid') === 'stExpander') {
-                            shouldCheck = true;
-                        }
-                    });
-                }
-            });
-            
-            if (shouldCheck) {
-                // Debounce the check
-                setTimeout(function() {
-                    autoExpandSidebar();
-                }, 100);
-            }
-        });
-        
-        // Observe sidebar for expander changes
-        expanderObserver.observe(sidebar, {
-            attributes: true,
-            attributeFilter: ['aria-expanded'],
-            childList: true,
-            subtree: true
-        });
-        
-        // Also listen for click events on expander headers (faster detection)
-        sidebar.addEventListener('click', function(e) {
-            const expander = e.target.closest('[data-testid="stExpander"]');
-            if (expander) {
-                setTimeout(function() {
-                    autoExpandSidebar();
-                }, 150);
-            }
-        }, true);
-    }
-    
-    // Initialize expander observer when sidebar is ready
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function() {
-            setTimeout(initExpanderObserver, 1000);
-        });
-    } else {
-        setTimeout(initExpanderObserver, 1000);
-    }
 })();
 </script>
 """, height=0, width=0)
-
-# Initialize session state - MUST be after sidebar
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
-if "conversation_id" not in st.session_state:
-    st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-# Sidebar state - default to open/expanded
-if "sidebar_open" not in st.session_state:
-    st.session_state.sidebar_open = True   # ← This single line reveals v2.0 forever
-if "sidebar_collapsed" not in st.session_state:
-    st.session_state.sidebar_collapsed = False
-if "sidebar_width" not in st.session_state:
-    st.session_state.sidebar_width = 280
-
-# Ensure sidebar is expanded on initial load
-# Streamlit's initial_sidebar_state="expanded" handles this, but we sync our state
-if st.session_state.sidebar_open and not st.session_state.sidebar_collapsed:
-    # Sidebar should be open - this is handled by initial_sidebar_state
-    pass
-if "current_page" not in st.session_state:
-    st.session_state.current_page = "chat"
-if "project_tag" not in st.session_state:
-    st.session_state.project_tag = ""
-if "current_focus" not in st.session_state:
-    st.session_state.current_focus = "General"
-if "raw_mode" not in st.session_state:
-    st.session_state.raw_mode = False
-if "rag_threshold" not in st.session_state:
-    st.session_state.rag_threshold = 0.25
-if "top_k" not in st.session_state:
-    st.session_state.top_k = rag_utils.DEFAULT_K
-if "show_context" not in st.session_state:
-    st.session_state.show_context = False
-
-# Initialize v2.0 state variables
-if "related_notes" not in st.session_state:
-    st.session_state.related_notes = []
-if "current_thread" not in st.session_state:
-    st.session_state.current_thread = None
-if "memory_streams" not in st.session_state:
-    st.session_state.memory_streams = []
-if "rag_context" not in st.session_state:
-    st.session_state.rag_context = []
-if "settings" not in st.session_state:
-    st.session_state.settings = {
-        'top_k': st.session_state.get('top_k', 3),
-        'relevance_threshold': st.session_state.get('rag_threshold', 0.25),
-        'auto_crystallize': False,
-        'uncensored_mode': st.session_state.get('raw_mode', False),
-        'auto_ingest_obsidian': st.session_state.get('auto_ingest_obsidian', True),
-        'manual_rag_tuning': False
-    }
 
 # Initialize ChatLogger
 if "chat_logger" not in st.session_state:
@@ -1756,203 +2158,120 @@ if "chat_logger" not in st.session_state:
 # Claude/Grok Design Language CSS - Consolidated and moved after sidebar
 st.markdown("""
 <style>
-    /* GROK.COM SIDEBAR — FINAL 4 PX GAP — NOVEMBER 2025 */
+    /* GROK.COM 2026 — PURE MONOCHROME + PURPLE */
     section[data-testid="stSidebar"] {
-        background: #000000 !important;
-        padding: 12px 0 0 0 !important;
-        width: 260px !important;
-        min-width: 260px !important;
+        width: 280px !important;
+        min-width: 280px !important;
+        max-width: 280px !important;
         flex-shrink: 0 !important;
-        transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
-        position: relative !important;
-        z-index: 1 !important;
+        background: #000 !important;
+        border-right: 1px solid #1a1a1a !important;
+        z-index: 1;
+        transition: none !important;
+        overflow-y: auto !important;  /* Ensure scrolling works */
+        height: 100vh !important;     /* Full height for scrolling */
     }
     
-    section[data-testid="stSidebar"].collapsed {
-        width: 0 !important;
-        min-width: 0 !important;
-        overflow: hidden !important;
+    .secondary-sidebar {
+        position: fixed !important;
+        left: 280px !important;
+        top: 0 !important;
+        bottom: 0 !important;
+        width: 520px !important;
+        background: #0a0a0a !important;
+        border-right: 1px solid #1a1a1a !important;
+        box-shadow: 8px 0 32px rgba(0,0,0,0.7) !important;
+        z-index: 9999 !important;
+        transform: translateX(-100%) !important;
+        transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        overflow-y: auto !important;
+        padding: 20px 0 !important;
     }
     
-    /* Kill every possible gap source */
-    section[data-testid="stSidebar"] > div,
-    section[data-testid="stSidebar"] div[data-testid="stSidebarNav"],
-    section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] {
-        gap: 0 !important;
-        padding: 0 !important;
-        margin: 0 !important;
+    .secondary-sidebar.open {
+        transform: translateX(0) !important;
+    }
+    
+    /* Ensure Streamlit components render inside secondary sidebar */
+    .secondary-sidebar {
         display: flex !important;
         flex-direction: column !important;
-        align-items: flex-start !important;
-        justify-content: flex-start !important;
     }
     
-    /* Force exactly 4px between items */
-    section[data-testid="stSidebar"] .stButton {
-        margin: 2px 0 !important;   /* 2px top + 2px bottom = 4px total gap */
+    #secondary-content {
+        flex: 1 !important;
+        overflow-y: auto !important;
         width: 100% !important;
-        display: flex !important;
-        justify-content: flex-start !important;
-        align-items: flex-start !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+        padding: 0 24px !important;
     }
     
-    /* Button itself — zero extra space, left-aligned */
-    section[data-testid="stSidebar"] .stButton > button {
-        background: transparent !important;
-        border: none !important;
-        color: #e4e4e7 !important;
-        font-family: 'Inter', system-ui, sans-serif !important;
-        font-size: 13.5px !important;
-        font-weight: 500 !important;
-        padding: 0 20px !important;
-        margin: 0 !important;
-        height: 32px !important;
-        line-height: 32px !important;
-        text-align: left !important;
+    /* Style Streamlit components inside secondary sidebar */
+    .secondary-sidebar .element-container,
+    .secondary-sidebar .stContainer {
         width: 100% !important;
-        border-radius: 6px !important;
-        transition: background 0.15s ease !important;
-        display: flex !important;
-        justify-content: flex-start !important;
-        align-items: center !important;
+        max-width: 100% !important;
     }
     
-    /* Hover & active — exact Grok */
-    section[data-testid="stSidebar"] .stButton > button:hover,
-    section[data-testid="stSidebar"] .stButton > button.active-page,
-    section[data-testid="stSidebar"] .stButton > button[aria-selected="true"] {
-        background: #1c1c1c !important;
-        color: #ffffff !important;
+    /* Ensure Streamlit components inside #secondary-content are properly styled */
+    #secondary-content .element-container,
+    #secondary-content .stContainer {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+    
+    .secondary-sidebar .back-arrow {
+        position: absolute;
+        top: 16px;
+        right: 16px;
+        width: 36px;
+        height: 36px;
+        background: rgba(255,255,255,0.08);
+        border-radius: 10px;
+        color: #aaa;
+        font-size: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+    }
+    
+    .secondary-sidebar .back-arrow:hover {
+        background: rgba(255,255,255,0.15);
+        color: white;
+    }
+    
+    .main-container {
+        transition: margin-left 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    
+    body.secondary-open .main-container {
+        margin-left: 800px !important;  /* 280 + 520 */
+    }
+    
+    /* Active nav pill — gray, full width, static */
+    section[data-testid="stSidebar"] button[kind="secondary"][data-active="true"],
+    section[data-testid="stSidebar"] button[data-active="true"] {
+        background: #2d2d2d !important;
+        color: white !important;
         font-weight: 600 !important;
     }
     
-    /* New Chat pill — unchanged */
-    .new-chat-btn {
-        margin: 0 16px 16px 16px !important;
-        height: 32px !important;
-        line-height: 32px !important;
-        padding: 0 16px !important;
+    /* Kill all red */
+    .stSlider > div > div > div > div {
+        background: #333 !important;
+    }
+    
+    .stSlider > div > div > div > div > div {
+        background: white !important;
+        box-shadow: 0 0 20px rgba(139, 92, 246, 0.4) !important;
+    }
+    
+    button[kind="primary"], .invent-law-btn {
         background: #8b5cf6 !important;
         color: white !important;
-        font-size: 13.5px !important;
-        font-weight: 600 !important;
-        border-radius: 20px !important;
-        text-align: center !important;
-        display: block !important;
-        cursor: pointer !important;
-        border: none !important;
-        transition: background 0.15s ease !important;
-    }
-    
-    .new-chat-btn:hover {
-        background: #7c3aed !important;
-    }
-    
-    /* REMOVE ALL DIVIDERS & GAPS */
-    section[data-testid="stSidebar"] hr,
-    section[data-testid="stSidebar"] [data-testid="stSidebarNav"] + div,
-    section[data-testid="stSidebar"] div[style*="border-top"],
-    section[data-testid="stSidebar"] div[style*="margin-top: 1rem"] {
-        display: none !important;
-    }
-    
-    /* Subtle collapse/expand buttons — exact Claude style */
-    section[data-testid="stSidebar"] .sidebar-toggle {
-        position: absolute !important;
-        top: 12px !important;
-        right: 12px !important;
-        width: 28px !important;
-        height: 28px !important;
-        background: rgba(255,255,255,0.08) !important;
-        border: 1px solid rgba(255,255,255,0.15) !important;
-        border-radius: 6px !important;
-        color: #ccc !important;
-        font-size: 14px !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        cursor: pointer !important;
-        z-index: 100 !important;
-        backdrop-filter: blur(4px) !important;
-        transition: all 0.2s ease !important;
-    }
-    
-    section[data-testid="stSidebar"] .sidebar-toggle:hover {
-        background: rgba(255,255,255,0.15) !important;
-        color: white !important;
-    }
-    
-    section[data-testid="stSidebar"].collapsed .sidebar-toggle {
-        display: none !important;
-    }
-    
-    .main-expand-toggle {
-        position: fixed !important;
-        left: 0 !important;
-        top: 50% !important;
-        transform: translateY(-50%) !important;
-        width: 32px !important;
-        height: 80px !important;
-        background: rgba(80, 80, 90, 0.95) !important;
-        color: white !important;
-        font-size: 18px !important;
-        display: none !important;
-        align-items: center !important;
-        justify-content: center !important;
-        cursor: pointer !important;
-        z-index: 9999 !important;
-        border-top-right-radius: 8px !important;
-        border-bottom-right-radius: 8px !important;
-        box-shadow: 2px 0 8px rgba(0,0,0,0.3) !important;
-        transition: all 0.2s ease !important;
-    }
-    
-    .main-expand-toggle:hover {
-        background: rgba(100, 100, 110, 0.95) !important;
-    }
-    
-    body.sidebar-collapsed .main-expand-toggle {
-        display: flex !important;
-    }
-    
-    /* Make Streamlit's native collapsed control button visible and styled when sidebar is collapsed */
-    [data-testid="collapsedControl"] {
-        position: fixed !important;
-        left: 0 !important;
-        top: 50% !important;
-        transform: translateY(-50%) !important;
-        z-index: 9998 !important;
-        background: rgba(80, 80, 90, 0.95) !important;
-        border-top-right-radius: 8px !important;
-        border-bottom-right-radius: 8px !important;
-        box-shadow: 2px 0 8px rgba(0,0,0,0.3) !important;
-        min-width: 32px !important;
-        min-height: 80px !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        opacity: 1 !important;
-        visibility: visible !important;
-    }
-    
-    [data-testid="collapsedControl"]:hover {
-        background: rgba(100, 100, 110, 0.95) !important;
-    }
-    
-    /* Hide native button when sidebar is expanded */
-    section[data-testid="stSidebar"][aria-expanded="true"] ~ * [data-testid="collapsedControl"],
-    body:not(.sidebar-collapsed) [data-testid="collapsedControl"]:not(:hover) {
-        opacity: 0 !important;
-        pointer-events: none !important;
-    }
-    
-    /* Show native button when sidebar is collapsed - override any hiding */
-    body.sidebar-collapsed [data-testid="collapsedControl"],
-    section[data-testid="stSidebar"][aria-expanded="false"] ~ * [data-testid="collapsedControl"] {
-        display: flex !important;
-        opacity: 1 !important;
-        visibility: visible !important;
-        pointer-events: auto !important;
+        box-shadow: 0 0 20px rgba(139, 92, 246, 0.5) !important;
     }
     
     /* Main container - centered with max-width 1200px */
@@ -1994,6 +2313,45 @@ st.markdown("""
         display: flex;
         align-items: center;
         padding: 0 20px;
+    }
+    
+    /* Expand toggle button - visible when sidebar is collapsed */
+    .main-expand-toggle {
+        position: fixed !important;
+        left: 0 !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        width: 40px !important;
+        height: 60px !important;
+        background: rgba(0, 0, 0, 0.8) !important;
+        border: 1px solid #333 !important;
+        border-left: none !important;
+        border-radius: 0 8px 8px 0 !important;
+        color: white !important;
+        font-size: 20px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        z-index: 10000 !important;
+        transition: all 0.2s ease !important;
+        opacity: 0.7 !important;
+    }
+    
+    .main-expand-toggle:hover {
+        opacity: 1 !important;
+        background: rgba(0, 0, 0, 0.95) !important;
+    }
+    
+    /* Show expand button when sidebar is collapsed */
+    body.sidebar-collapsed .main-expand-toggle {
+        display: flex !important;
+    }
+    
+    /* Hide expand button when sidebar is expanded */
+    section[data-testid="stSidebar"][aria-expanded="true"] ~ * .main-expand-toggle,
+    body:not(.sidebar-collapsed) .main-expand-toggle {
+        display: none !important;
     }
     
     /* Main content area with header offset */
@@ -2234,18 +2592,6 @@ st.markdown("""
         margin-bottom: 4px;
     }
     
-    /* Fixed input area - Phase 7 */
-    .fixed-input-area {
-        position: fixed;
-        bottom: 0;
-        left: 0;
-        right: 0;
-        background: #1e1e1e;
-        border-top: 1px solid #333;
-        padding: 15px 20px;
-        z-index: 998;
-    }
-    
     /* Context pill - Phase 1 */
     .context-pill {
         display: inline-block;
@@ -2417,155 +2763,6 @@ st.markdown("""
         font-size: 15px !important;
     }
     
-    /* Sidebar - Denser Claude/Grok style */
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0a0a0a 0%, #111 100%) !important;
-        position: relative !important;
-        min-width: 200px !important;
-        max-width: 1200px !important;
-    }
-    
-    /* Sidebar resize handle */
-    .sidebar-resize-handle {
-        position: absolute !important;
-        top: 0 !important;
-        right: 0 !important;
-        width: 8px !important;
-        height: 100% !important;
-        background: transparent !important;
-        cursor: col-resize !important;
-        z-index: 10000 !important;
-        transition: background 0.2s ease !important;
-        pointer-events: auto !important;
-    }
-    
-    .sidebar-resize-handle:hover {
-        background: rgba(124, 58, 237, 0.6) !important;
-        width: 8px !important;
-    }
-    
-    .sidebar-resize-handle.dragging {
-        background: rgba(124, 58, 237, 0.9) !important;
-        width: 8px !important;
-    }
-    
-    /* Visual indicator for resize handle */
-    .sidebar-resize-handle::before {
-        content: '';
-        position: absolute;
-        left: 50%;
-        top: 50%;
-        transform: translate(-50%, -50%);
-        width: 2px;
-        height: 40px;
-        background: rgba(124, 58, 237, 0.3);
-        border-radius: 1px;
-        opacity: 0;
-        transition: opacity 0.2s ease;
-    }
-    
-    .sidebar-resize-handle:hover::before {
-        opacity: 1;
-    }
-    
-    /* Prevent text selection during resize */
-    body.resizing {
-        user-select: none !important;
-        cursor: col-resize !important;
-    }
-    
-    body.resizing * {
-        cursor: col-resize !important;
-    }
-    
-    /* Sidebar content area - tighter spacing */
-    section[data-testid="stSidebar"] > div {
-        background: transparent !important;
-        padding: 12px 16px !important;
-        overflow-x: visible !important;
-        overflow-y: auto !important;
-        width: 100% !important;
-        box-sizing: border-box !important;
-        min-width: 0 !important;
-    }
-    
-    /* Expander content - allow overflow detection */
-    section[data-testid="stSidebar"] [data-testid="stExpander"] {
-        overflow-x: visible !important;
-        width: 100% !important;
-    }
-    
-    /* Expander content area - maintain margins */
-    section[data-testid="stSidebar"] [data-testid="stExpanderContent"],
-    section[data-testid="stSidebar"] .streamlit-expanderContent {
-        padding: 8px 0 !important;
-        overflow-x: visible !important;
-        width: 100% !important;
-        box-sizing: border-box !important;
-    }
-    
-    /* Ensure all sidebar content respects margins */
-    section[data-testid="stSidebar"] * {
-        max-width: 100% !important;
-        box-sizing: border-box !important;
-    }
-    
-    /* But allow tables and wide content to overflow for detection */
-    section[data-testid="stSidebar"] table,
-    section[data-testid="stSidebar"] .stDataFrame,
-    section[data-testid="stSidebar"] pre {
-        overflow-x: visible !important;
-        max-width: none !important;
-    }
-    
-    /* Sidebar buttons - smaller, denser */
-    section[data-testid="stSidebar"] button {
-        padding: 6px 12px !important;
-        margin: 2px 0 !important;
-        font-size: 13px !important;
-        border-radius: 6px !important;
-        min-height: 32px !important;
-        line-height: 1.4 !important;
-    }
-    
-    /* Active sidebar item highlight - purple accent */
-    section[data-testid="stSidebar"] button[kind="secondary"]:has-text,
-    section[data-testid="stSidebar"] button:active {
-        background: rgba(124, 58, 237, 0.2) !important;
-        border-left: 2px solid #7c3aed !important;
-    }
-    
-    /* New Chat button - small pill shape */
-    section[data-testid="stSidebar"] button[kind="primary"] {
-        background: rgba(124, 58, 237, 0.3) !important;
-        border: 1px solid rgba(124, 58, 237, 0.5) !important;
-        border-radius: 20px !important;
-        padding: 6px 16px !important;
-        font-size: 12px !important;
-        width: auto !important;
-        max-width: fit-content !important;
-        margin: 8px auto !important;
-    }
-    
-    /* Sidebar text - smaller, crisper */
-    section[data-testid="stSidebar"] h1,
-    section[data-testid="stSidebar"] h2,
-    section[data-testid="stSidebar"] h3 {
-        font-size: 14px !important;
-        margin: 8px 0 4px 0 !important;
-        padding: 0 !important;
-    }
-    
-    /* Sidebar expanders - tighter */
-    section[data-testid="stSidebar"] [data-testid="stExpander"] {
-        margin: 4px 0 !important;
-    }
-    
-    /* Sidebar captions - smaller */
-    section[data-testid="stSidebar"] .stCaption {
-        font-size: 11px !important;
-        margin: 2px 0 !important;
-    }
     
     /* Relevance badge styles */
     .relevance-badge {
@@ -2694,23 +2891,101 @@ def render_header():
         st.session_state.project_tag = project_tag
     
     with col2:
-        # Model selector
+        # Enhanced Model selector with Powercore registry
         try:
-            available_models = get_ollama_models()
-            current_model = config.OLLAMA_CHAT_MODEL
-            model_index = 0
-            if current_model in available_models:
-                model_index = available_models.index(current_model)
-            selected_model = st.selectbox(
+            from src.app.utils.model_registry import get_model_registry
+            from src.app.utils.model_loader import is_gguf_path
+            from src.app.utils.vault_config import POWERCORE_MODELS
+            
+            registry = get_model_registry()
+            display_list = registry.get_model_display_list(include_ollama=True)
+            
+            # Get current model
+            current_model_path = st.session_state.get("selected_model_path")
+            current_model_name = st.session_state.get("selected_model", config.OLLAMA_CHAT_MODEL)
+            
+            # Build options list (filter out separators for selectbox)
+            model_options = []
+            model_paths = {}
+            current_index = 0
+            
+            for i, (display_name, model_path) in enumerate(display_list):
+                if model_path is None:  # Separator
+                    model_options.append(display_name)
+                    model_paths[display_name] = None
+                else:
+                    model_options.append(display_name)
+                    model_paths[display_name] = model_path
+                    # Check if this is the current model
+                    if model_path == current_model_path or (not current_model_path and display_name == current_model_name):
+                        current_index = len(model_options) - 1
+            
+            # Add Ollama models
+            try:
+                ollama_models = get_ollama_models()
+                if ollama_models:
+                    model_options.append("— Ollama Models —")
+                    model_paths["— Ollama Models —"] = None
+                    for ollama_model in ollama_models:
+                        model_options.append(f"🦙 {ollama_model}")
+                        model_paths[f"🦙 {ollama_model}"] = ollama_model
+                        if ollama_model == current_model_name and not current_model_path:
+                            current_index = len(model_options) - 1
+            except Exception:
+                pass  # Ollama not available
+            
+            # Selectbox
+            selected_display = st.selectbox(
                 "Model",
-                available_models,
-                index=model_index,
+                model_options,
+                index=current_index,
                 key="header_model_selector",
                 label_visibility="collapsed"
             )
-            st.session_state.selected_model = selected_model
+            
+            # Get the actual model identifier
+            selected_path = model_paths.get(selected_display)
+            
+            if selected_path:
+                # Check if it's a GGUF path
+                if is_gguf_path(selected_path):
+                    st.session_state.selected_model_path = selected_path
+                    st.session_state.selected_model = selected_path
+                    st.session_state.model_loader_type = "gguf"
+                else:
+                    # Ollama model
+                    st.session_state.selected_model = selected_path
+                    st.session_state.selected_model_path = None
+                    st.session_state.model_loader_type = "ollama"
+            else:
+                # Separator or no selection
+                st.session_state.selected_model = config.OLLAMA_CHAT_MODEL
+                st.session_state.selected_model_path = None
+                st.session_state.model_loader_type = "ollama"
+                
         except Exception as e:
-            st.session_state.selected_model = config.OLLAMA_CHAT_MODEL
+            logger.warning(f"Model selector error: {e}, falling back to Ollama")
+            # Fallback to simple Ollama selector
+            try:
+                available_models = get_ollama_models()
+                current_model = config.OLLAMA_CHAT_MODEL
+                model_index = 0
+                if current_model in available_models:
+                    model_index = available_models.index(current_model)
+                selected_model = st.selectbox(
+                    "Model",
+                    available_models,
+                    index=model_index,
+                    key="header_model_selector_fallback",
+                    label_visibility="collapsed"
+                )
+                st.session_state.selected_model = selected_model
+                st.session_state.selected_model_path = None
+                st.session_state.model_loader_type = "ollama"
+            except Exception:
+                st.session_state.selected_model = config.OLLAMA_CHAT_MODEL
+                st.session_state.selected_model_path = None
+                st.session_state.model_loader_type = "ollama"
     
     with col3:
         # Mode controls - compact inline
@@ -2969,7 +3244,7 @@ def crystallize_with_canvas_integration(conversation_history: List[Dict] = None,
             return None, 0
         
         # 3. Update canvas.json
-        vault_path = Path(os.getenv('OBSIDIAN_VAULT_PATH', './knowledge/notes'))
+        vault_path = resolve_obsidian_vault_path()
         canvas_path = vault_path / 'canvas.json'
         
         try:
@@ -3191,6 +3466,15 @@ def render_rag_transparency():
                     if success:
                         st.info("✓ Lowered!")
                         st.rerun()
+
+# ============================================================================
+# BLOCK ALL PAGE RENDERING WHEN SECONDARY SIDEBAR IS OPEN
+# ============================================================================
+# This is defensive programming - if secondary sidebar is open, stop here
+# (The secondary sidebar block at the top should have already stopped execution,
+#  but this ensures nothing else renders if somehow we get here)
+if st.session_state.get("secondary_sidebar"):
+    st.stop()
 
 # NOW open the main container - AFTER sidebar is fully rendered
 st.markdown('<div class="main-container">', unsafe_allow_html=True)
@@ -3441,8 +3725,8 @@ if st.session_state.current_page == "chat":
         thinking_placeholder.markdown(render_thinking_animation(), unsafe_allow_html=True)
         
         try:
-            # Get selected model
-            selected_model = st.session_state.get("selected_model", config.OLLAMA_CHAT_MODEL)
+            # Get selected model (prefer path if available)
+            selected_model = st.session_state.get("selected_model_path") or st.session_state.get("selected_model", config.OLLAMA_CHAT_MODEL)
             
             # Call answer_question
             result = rag_utils.answer_question(
@@ -3452,6 +3736,18 @@ if st.session_state.current_page == "chat":
                 rag_threshold=st.session_state.rag_threshold,
                 model=selected_model
             )
+            
+            # Resonance tracking
+            try:
+                from src.app.utils.resonance_evolution import get_resonance_evolution
+                evolution = get_resonance_evolution()
+                evolution.log_resonance_event(
+                    conversation_id=st.session_state.conversation_id,
+                    user_response=question,
+                    chain_used=st.session_state.get('last_chain_used')
+                )
+            except Exception as e:
+                logger.debug(f"Resonance tracking error: {e}")
             
             # Clear thinking animation
             thinking_placeholder.empty()
@@ -3664,9 +3960,18 @@ if st.session_state.current_page == "chat":
                 st.query_params.clear()
     
     st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Phase 7: Fixed input area (handled by st.chat_input above, but we add styling)
-    st.markdown('<div class="fixed-input-area"></div>', unsafe_allow_html=True)
+
+elif st.session_state.current_page == "knowledge_base":
+    st.markdown("<h1 style='color:white;margin:32px 0 40px;font-weight:600;'>Knowledge Base</h1>", unsafe_allow_html=True)
+    tab1, tab2, tab3, tab4 = st.tabs(["Vault", "Documents", "Graph", "Visualize"])
+    with tab1:
+        render_vault_tree()
+    with tab2:
+        render_documents_list()
+    with tab3:
+        render_knowledge_graph()
+    with tab4:
+        render_visualize_panel()
 
 elif st.session_state.current_page == "cognitive_ide":
     # Cognitive IDE - Visual Chain Editor
@@ -3677,6 +3982,132 @@ elif st.session_state.current_page == "cognitive_ide":
         logger.error(f"Error rendering Cognitive IDE: {e}")
         st.error(f"Failed to load Cognitive IDE: {e}")
         st.info("Make sure all dependencies are installed: pip install pyyaml")
+
+elif st.session_state.current_page == "temporal_vault":
+    # Temporal Vault - Mem0 Memory Search and Remix
+    st.markdown("<h1 style='color:white;margin:32px 0 40px;font-weight:600;'>Temporal Vault</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#888;margin-bottom:32px;'>Your mind, remembered forever. Search and remix your resonance history.</p>", unsafe_allow_html=True)
+    
+    try:
+        from src.app.utils.mem0_memory import get_mem0_memory
+        
+        mem0 = get_mem0_memory()
+        
+        if not mem0.memory:
+            st.warning("Mem0 not initialized. Install with: pip install mem0ai==0.1.22")
+            st.info("Mem0 provides persistent, adaptive memory for your cognitive history.")
+        else:
+            # Search box
+            search_query = st.text_input(
+                "Search Memories",
+                placeholder="e.g., resonance chains, quantum entropy, leverage matrix...",
+                key="temporal_search"
+            )
+            
+            # Filters
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                filter_type = st.selectbox(
+                    "Filter Type",
+                    ["All", "Resonance Events", "Chain Executions", "God Chains"],
+                    key="temporal_filter_type"
+                )
+            with col2:
+                min_combo = st.slider(
+                    "Min Combo Score",
+                    0.0, 100.0, 0.0, 5.0,
+                    key="temporal_min_combo"
+                )
+            with col3:
+                limit = st.number_input("Results Limit", 1, 50, 20, key="temporal_limit")
+            
+            # Build filters
+            filters = {}
+            if filter_type == "Resonance Events":
+                filters["type"] = "resonance_event"
+            elif filter_type == "Chain Executions":
+                filters["type"] = "chain_execution"
+            elif filter_type == "God Chains":
+                filters["god_chain"] = True
+            
+            if min_combo > 0:
+                # Note: Mem0 filters might need adjustment based on actual API
+                pass
+            
+            # Search button
+            if st.button("🔍 Search", key="temporal_search_btn", type="primary", use_container_width=True):
+                if search_query:
+                    results = mem0.search_memories(search_query, limit=limit, filters=filters if filters else None)
+                    st.session_state.temporal_search_results = results
+                else:
+                    # Get all memories if no query
+                    results = mem0.search_memories("", limit=limit, filters=filters if filters else None)
+                    st.session_state.temporal_search_results = results
+            
+            # Display results
+            if st.session_state.get("temporal_search_results"):
+                results = st.session_state.temporal_search_results
+                st.markdown(f"### Found {len(results)} memories")
+                
+                for i, memory in enumerate(results):
+                    with st.expander(
+                        f"Memory {i+1}: {memory.get('text', '')[:100]}...",
+                        expanded=False
+                    ):
+                        st.markdown(f"**Content:**\n{memory.get('text', '')}")
+                        
+                        metadata = memory.get('metadata', {})
+                        if metadata:
+                            st.markdown("**Metadata:**")
+                            col_meta1, col_meta2, col_meta3 = st.columns(3)
+                            with col_meta1:
+                                if metadata.get('combo_score'):
+                                    st.metric("Combo Score", f"{metadata['combo_score']:.1f}%")
+                            with col_meta2:
+                                if metadata.get('resonance_score'):
+                                    st.metric("Resonance", metadata['resonance_score'])
+                            with col_meta3:
+                                if metadata.get('chain_name'):
+                                    st.caption(f"Chain: {metadata['chain_name']}")
+                        
+                        # Action buttons
+                        col_action1, col_action2 = st.columns(2)
+                        with col_action1:
+                            if st.button("💉 Inject into Current Chain", key=f"inject_mem_{i}", use_container_width=True):
+                                # Store memory for injection
+                                st.session_state.memory_to_inject = memory.get('text', '')
+                                st.success("Memory ready to inject! Go to Cognitive IDE and it will be available.")
+                        with col_action2:
+                            if st.button("🔄 Remix as New Chain", key=f"remix_mem_{i}", use_container_width=True):
+                                # Create new chain from memory
+                                st.session_state.chain_editor_name = f"Remix from Memory {i+1}"
+                                st.session_state.chain_editor_nodes = {
+                                    "0": {
+                                        "description": "Memory Remix",
+                                        "prompt": memory.get('text', ''),
+                                        "temperature": 0.7,
+                                        "rag_k": 8
+                                    }
+                                }
+                                st.session_state.current_page = "cognitive_ide"
+                                st.rerun()
+            
+            # Stats
+            st.markdown("---")
+            stats = mem0.get_memory_stats()
+            col_stat1, col_stat2, col_stat3 = st.columns(3)
+            with col_stat1:
+                st.metric("Total Memories", stats.get("total_memories", 0))
+            with col_stat2:
+                st.metric("Resonance Events", stats.get("resonance_events", 0))
+            with col_stat3:
+                st.metric("God Chains", stats.get("god_chains", 0))
+                
+    except ImportError:
+        st.error("Mem0 not installed. Install with: pip install mem0ai==0.1.22")
+    except Exception as e:
+        logger.error(f"Error rendering Temporal Vault: {e}")
+        st.error(f"Failed to load Temporal Vault: {e}")
 
 elif st.session_state.current_page == "ingest":
     # Ingest page (old Ingest tab content - simplified)
@@ -3802,8 +4233,9 @@ elif st.session_state.current_page == "graph":
     else:
         st.warning("Backend not available.")
 
-elif st.session_state.current_page == "settings":
-    # Settings page (consolidated from sidebar)
+elif st.session_state.current_page == "settings" and not st.session_state.secondary_sidebar:
+    # Settings page (only render if secondary sidebar is NOT open)
+    # If secondary sidebar is open, settings are shown there instead
     st.header("Settings")
     st.subheader("Chat Settings")
     top_k = st.slider("Top-K context chunks", min_value=1, max_value=10, value=st.session_state.top_k)
@@ -3812,7 +4244,21 @@ elif st.session_state.current_page == "settings":
     st.session_state.show_context = show_context
     
     st.subheader("Model Settings")
-    st.code(f"Chat model: {st.session_state.get('selected_model', config.OLLAMA_CHAT_MODEL)}")
+    
+    # Vault info
+    from src.app.utils.vault_config import VAULT_ROOT_PATH
+    st.caption(f"Vault: {VAULT_ROOT_PATH}")
+    
+    # Current model info
+    selected_model = st.session_state.get("selected_model", config.OLLAMA_CHAT_MODEL)
+    model_loader_type = st.session_state.get("model_loader_type", "ollama")
+    selected_model_path = st.session_state.get("selected_model_path")
+    
+    st.code(f"Chat model: {selected_model}")
+    if selected_model_path:
+        st.code(f"Model path: {selected_model_path}")
+        st.code(f"Loader: {model_loader_type.upper()}")
+    
     st.code(f"Embedding model: {config.OLLAMA_EMBED_MODEL}")
     st.code(f"Ollama API: {config.OLLAMA_API_BASE}")
 

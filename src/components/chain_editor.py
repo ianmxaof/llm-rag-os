@@ -549,6 +549,106 @@ def render_chain_editor_content():
     with st.sidebar:
         st.subheader("Chain Library")
         
+        # Fabric Patterns Section
+        with st.expander("🔮 Fabric Patterns", expanded=False):
+            try:
+                from src.app.utils.fabric_loader import get_fabric_loader
+                fabric_loader = get_fabric_loader()
+                
+                # Download official patterns button
+                if st.button("📥 Download Official Patterns", key="download_fabric", use_container_width=True):
+                    with st.spinner("Downloading Fabric patterns..."):
+                        if fabric_loader.download_official_patterns():
+                            st.success("Fabric patterns downloaded!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to download patterns")
+                
+                # List all patterns
+                all_patterns = fabric_loader.list_patterns()
+                if all_patterns:
+                    st.caption(f"{len(all_patterns)} patterns available")
+                    
+                    # Pattern selector
+                    selected_pattern = st.selectbox(
+                        "Select Pattern",
+                        [""] + all_patterns,
+                        key="fabric_pattern_selector",
+                        format_func=lambda x: x.replace("!", "") if x else "[Select a pattern]"
+                    )
+                    
+                    if selected_pattern:
+                        pattern_info = fabric_loader.get_pattern(selected_pattern)
+                        if pattern_info:
+                            st.caption(f"Category: {pattern_info.get('category', 'unknown')}")
+                            st.caption(f"Description: {pattern_info.get('description', '')[:100]}...")
+                            
+                            # Inject into current chain button
+                            if st.button("➕ Inject into Chain", key="inject_fabric", use_container_width=True):
+                                # Add as new node
+                                node_count = len(st.session_state.chain_editor_nodes)
+                                new_id = str(uuid.uuid4())[:8]
+                                
+                                system_prompt = pattern_info.get('system_prompt', '')
+                                
+                                st.session_state.chain_editor_nodes[new_id] = {
+                                    "description": f"Fabric: {selected_pattern.replace('!', '')}",
+                                    "prompt": system_prompt,
+                                    "temperature": 0.7,
+                                    "rag_k": 8
+                                }
+                                
+                                # Auto-connect to previous node
+                                if node_count > 0:
+                                    prev_ids = sorted(st.session_state.chain_editor_nodes.keys(), 
+                                                     key=lambda x: int(x) if x.isdigit() else 0)
+                                    if prev_ids:
+                                        prev_id = prev_ids[-1]
+                                        new_conn = [prev_id, new_id]
+                                        if new_conn not in st.session_state.chain_editor_connections:
+                                            st.session_state.chain_editor_connections.append(new_conn)
+                                
+                                st.success(f"Injected {selected_pattern} into chain")
+                                st.rerun()
+                else:
+                    st.info("No Fabric patterns loaded. Click 'Download Official Patterns' to get started.")
+            except ImportError:
+                st.warning("Fabric loader not available")
+            except Exception as e:
+                st.error(f"Fabric patterns error: {e}")
+                logger.error(f"Fabric patterns error: {e}")
+        
+        # Combo Difficulty Slider
+        with st.expander("⚔ Combo Difficulty", expanded=False):
+            difficulty = st.slider(
+                "Sensei Strictness",
+                min_value=0.05,
+                max_value=1.00,
+                value=st.session_state.get("combo_difficulty", 0.25),
+                step=0.05,
+                help="0.05 = near-impossible | 1.00 = original forgiving mode"
+            )
+            st.session_state.combo_difficulty = difficulty
+            
+            from src.app.utils.combo_meter_v3 import get_difficulty_label
+            difficulty_label = get_difficulty_label(difficulty)
+            st.caption(f"Current: {difficulty_label}")
+            
+            # Quick presets
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("God Slayer", key="diff_god", use_container_width=True):
+                    st.session_state.combo_difficulty = 0.15
+                    st.rerun()
+            with col2:
+                if st.button("Brutal", key="diff_brutal", use_container_width=True):
+                    st.session_state.combo_difficulty = 0.25
+                    st.rerun()
+            with col3:
+                if st.button("Normal", key="diff_normal", use_container_width=True):
+                    st.session_state.combo_difficulty = 1.0
+                    st.rerun()
+        
         # Load available chains
         all_chains = load_chains_from_dirs()
         
@@ -809,13 +909,33 @@ def render_chain_editor_content():
                 for msg in st.session_state.chat_history[-5:]
             ])
         
-        score = calculate_combo_score(
-            steps_list, 
-            st.session_state.chain_editor_connections,
-            conversation_context
-        )
-        
-        render_enhanced_combo_meter(score, conversation_context)
+        # Use Combo Meter v3 if available, fallback to v2
+        try:
+            from src.app.utils.combo_meter_v3 import calculate_combo_v3, render_combo_meter_v3
+            
+            # Convert steps to chain_history format for v3
+            chain_history = [
+                {"response": step.get("prompt", ""), "output": step.get("prompt", "")}
+                for step in steps_list
+            ]
+            
+            # Calculate score with v3
+            score = calculate_combo_v3(
+                step_output=conversation_context or " ".join([s.get("description", "") for s in steps_list]),
+                chain_history=chain_history,
+                resonance_graph=None,
+                conversation_context=conversation_context
+            )
+            
+            render_combo_meter_v3(score, conversation_context)
+        except ImportError:
+            # Fallback to v2
+            score = calculate_combo_score(
+                steps_list, 
+                st.session_state.chain_editor_connections,
+                conversation_context
+            )
+            render_enhanced_combo_meter(score, conversation_context)
         
         # Mermaid Preview
         if steps_list:
@@ -981,12 +1101,136 @@ def render_chain_editor_content():
                         st.markdown(result['final_output'])
                         st.balloons()
                         
-                        # Check for resonance tracking (if chain was imported)
+                        # Store chain result for resonance tracking
+                        st.session_state.last_chain_result = result
+                        st.session_state.last_chain_config = chain_config
+                        st.session_state.last_chain_name = chain_name
+                        
+                        # Resonance button for all chain executions
+                        st.markdown("---")
+                        st.markdown("### Resonance")
+                        col_resonance, col_info = st.columns([2, 1])
+                        with col_resonance:
+                            if st.button("✨ Resonance Achieved", 
+                                        key="resonance_btn_chain_editor", 
+                                        use_container_width=True,
+                                        type="primary"):
+                                try:
+                                    from src.app.utils.resonance_evolution import get_resonance_evolution
+                                    
+                                    evolution = get_resonance_evolution()
+                                    
+                                    # Calculate combo score for this chain using v3
+                                    steps_list = list(st.session_state.chain_editor_nodes.values())
+                                    
+                                    # Try to use v3, fallback to v2
+                                    try:
+                                        from src.app.utils.combo_meter_v3 import calculate_combo_v3
+                                        chain_history = [
+                                            {"response": step.get("prompt", ""), "output": step.get("prompt", "")}
+                                            for step in steps_list
+                                        ]
+                                        combo_score = calculate_combo_v3(
+                                            step_output=result['final_output'],
+                                            chain_history=chain_history,
+                                            conversation_context=context_input
+                                        )
+                                    except ImportError:
+                                        combo_score = calculate_combo_score(
+                                            steps_list,
+                                            st.session_state.chain_editor_connections,
+                                            context_input
+                                        )
+                                    
+                                    # Prepare chain context
+                                    chain_context = {
+                                        "steps": result.get('steps', []),
+                                        "connections": st.session_state.chain_editor_connections,
+                                        "chain_name": chain_name,
+                                        "final_output": result['final_output']
+                                    }
+                                    
+                                    # Log resonance event with full context
+                                    success = evolution.log_resonance_event(
+                                        conversation_id=st.session_state.get("conversation_id", "unknown"),
+                                        user_response=None,  # Button click, not text
+                                        chain_used=chain_name,
+                                        chain_context=chain_context,
+                                        combo_score=combo_score,
+                                        force=True  # Force logging for button click
+                                    )
+                                    
+                                    # Create myth fragment via Resonance → Myth Bridge
+                                    try:
+                                        import sys
+                                        from pathlib import Path
+                                        sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+                                        from shared.agents.powercore_interface import get_powercore_interface
+                                        
+                                        powercore = get_powercore_interface()
+                                        myth_result = powercore.on_resonance_achieved(
+                                            chain_output=result['final_output'],
+                                            combo_score=combo_score,
+                                            chain_name=chain_name,
+                                            chain_context=chain_context
+                                        )
+                                        
+                                        if myth_result.get("success"):
+                                            myth_rarity = myth_result.get('myth_fragment', {}).get('rarity', 'common')
+                                            st.info(f"✨ Myth fragment created! Rarity: {myth_rarity}")
+                                    except Exception as e:
+                                        logger.warning(f"Failed to create myth fragment: {e}")
+                                        # Don't fail the resonance logging if myth creation fails
+                                    
+                                    if success:
+                                        st.balloons()
+                                        resonance_count = evolution.get_resonance_count()
+                                        st.success(f"✨ Resonance recorded! Total: {resonance_count}")
+                                        
+                                        # Auto-save 100% combo chains as Fabric patterns
+                                        if combo_score >= 100.0:
+                                            try:
+                                                from src.app.utils.fabric_loader import get_fabric_loader
+                                                fabric_loader = get_fabric_loader()
+                                                
+                                                chain_data_for_pattern = {
+                                                    "name": chain_name,
+                                                    "steps": steps_list,
+                                                    "connections": st.session_state.chain_editor_connections
+                                                }
+                                                
+                                                if fabric_loader.save_resonance_pattern(
+                                                    chain_data_for_pattern,
+                                                    combo_score,
+                                                    resonance_count
+                                                ):
+                                                    st.info(f"💾 Chain saved as Fabric pattern: resonance_{resonance_count}__{chain_name.replace(' ', '_').lower()}")
+                                            except Exception as e:
+                                                logger.error(f"Failed to save Fabric pattern: {e}")
+                                        
+                                        # Check if evolution threshold reached
+                                        if resonance_count % 50 == 0:
+                                            st.info(f"🧬 Evolution threshold reached ({resonance_count} events)! DPO training will begin soon.")
+                                    else:
+                                        st.error("Failed to record resonance")
+                                except Exception as e:
+                                    st.error(f"Resonance logging error: {e}")
+                                    logger.error(f"Resonance logging error: {e}")
+                        
+                        with col_info:
+                            from src.app.utils.resonance_evolution import get_resonance_evolution
+                            evolution = get_resonance_evolution()
+                            resonance_count = evolution.get_resonance_count()
+                            st.metric("Total Resonance", resonance_count)
+                            if resonance_count > 0:
+                                next_evolution = ((resonance_count // 50) + 1) * 50
+                                st.caption(f"Next evolution at {next_evolution}")
+                        
+                        # Legacy resonance tracking for imported chains
                         if st.session_state.get("imported_chain_id"):
                             st.markdown("---")
-                            st.markdown("### Resonance")
                             if st.button("✨ This chain changed my thinking (resonance)", 
-                                        key="resonance_btn", 
+                                        key="resonance_btn_imported", 
                                         use_container_width=True):
                                 from src.components.marketplace import track_resonance_event
                                 if track_resonance_event(st.session_state.imported_chain_id):

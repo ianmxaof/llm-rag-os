@@ -14,11 +14,12 @@ from typing import List, Dict, Optional
 
 # Import config for Obsidian paths
 try:
-    from scripts.config import config, OLLAMA_API_BASE
+    from scripts.config import config, OLLAMA_API_BASE, resolve_obsidian_vault_path
 except ImportError:
     # Fallback if config not available
     OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/api")
     config = None
+    resolve_obsidian_vault_path = None
 
 
 def get_relevance_emoji(score: float) -> str:
@@ -42,7 +43,9 @@ def _get_existing_note_titles(vault_path: Optional[Path] = None) -> List[str]:
         List of note titles (filenames without .md extension)
     """
     if vault_path is None:
-        if config and hasattr(config, 'ROOT'):
+        if resolve_obsidian_vault_path:
+            vault_path = resolve_obsidian_vault_path()
+        elif config and hasattr(config, 'ROOT'):
             vault_path = config.ROOT / "knowledge" / "notes"
         else:
             vault_path = Path("./knowledge/notes")

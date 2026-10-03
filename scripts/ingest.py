@@ -55,7 +55,20 @@ MODEL_NAME = config.EMBED_MODEL
 SUPPORTED_EXTS = config.SUPPORTED_EXTS
 
 # Obsidian system-folder skipping helper (added by Obsidian+RAG integration)
-SKIP_FOLDERS = {".obsidian", "_attachments", "_dashboard"}
+SKIP_FOLDERS = {
+    ".obsidian",
+    "_attachments",
+    "_dashboard",
+    "_secrets_pulled",
+    ".claude",
+    ".copilot",
+    ".smart-env",
+    "Copilot",
+    ".agents",
+    ".opencode",
+    ".claudian",
+    "Eni-main",
+}
 
 def should_skip(name: str) -> bool:
     """

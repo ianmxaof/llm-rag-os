@@ -124,6 +124,7 @@ def test_obsidian_uri():
     
     uri = generate_obsidian_uri("knowledge/notes/Manual/Test.md", 0, "# Introduction")
     assert uri.startswith("obsidian://"), "Should generate obsidian:// URI"
+    assert "vault=notes" in uri, "Should pin the second-brain vault name"
     assert "Test.md" in uri, "Should include filename"
     print(f"✓ Generated URI: {uri}")
     print("✓ URI generation tests passed\n")

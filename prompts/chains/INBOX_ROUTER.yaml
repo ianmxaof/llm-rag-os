@@ -1,0 +1,28 @@
+name: INBOX_ROUTER
+description: Classify 0-Inbox captures into PARA lanes (task, idea, reference, archive)
+version: 1.0
+
+settings:
+  default_temperature: 0.1
+  default_rag_k: 5
+
+steps:
+  - description: "Classify capture"
+    prompt: |
+      You are the Inbox Router for a PARA vault. Given this note excerpt:
+      {context}
+
+      Output ONLY one label: task | idea | reference | archive | inbox
+      Rules:
+      - task: actionable next steps, TODOs, deadlines
+      - idea: hypotheses, experiments, thinktank suggestions
+      - reference: links, docs, research, stable facts
+      - archive: done, crystallized, superseded
+      - inbox: unclear — leave for human triage
+    temperature: 0.1
+    rag_k: 5
+
+metadata:
+  created: 2026-08-29
+  author: tbcc
+  tags: [para, inbox, router, second-brain]

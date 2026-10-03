@@ -16,12 +16,12 @@ Features:
 - Multi-process embedding queue
 """
 
+import gc
 import hashlib
 import logging
 import os
 import sys
 import pandas as pd
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -56,14 +56,18 @@ from scripts.config import (
     PRE_COMPUTE_CHUNK_SUMMARIES,
     CHUNK_SUMMARY_MODEL,
     CHUNK_SUMMARY_MAX_TOKENS,
-    EMBEDDING_WORKERS,
+    EMBEDDING_BATCH_SIZE,
+    MAX_EMBED_CHARS,
+    MAX_INGEST_BODY_CHARS,
+    MAX_INGEST_CHUNKS_PER_NOTE,
+    MEMORY_SAFE_MAX_CHUNKS,
     OLLAMA_API_BASE,
     config
 )
 
 # Import Obsidian modules
 from scripts.obsidian_metadata import extract_all_metadata, strip_frontmatter
-from scripts.obsidian_chunker import chunk_by_headings, generate_obsidian_uri
+from scripts.obsidian_chunker import chunk_by_headings, generate_obsidian_uri, split_oversized_chunks
 from scripts.obsidian_ledger import IngestionLedger
 
 # Try importing optional dependencies
@@ -117,7 +121,13 @@ except ImportError:
 class ObsidianIngester:
     """Main ingester class for Obsidian notes."""
     
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        embed_batch_size: int | None = None,
+        max_chunks_per_note: int | None = None,
+        max_body_chars: int | None = None,
+    ):
         """Initialize ingester with all components."""
         self.ledger = IngestionLedger(INGESTION_LEDGER_PATH)
         self.embedder = None
@@ -125,6 +135,9 @@ class ObsidianIngester:
         self.curated_table = None
         self.raw_table = None
         self.compressor = None
+        self.embed_batch_size = max(1, embed_batch_size or EMBEDDING_BATCH_SIZE)
+        self.max_chunks_per_note = max_chunks_per_note
+        self.max_body_chars = max_body_chars
         
         self._init_embedder()
         self._init_database()
@@ -141,8 +154,9 @@ class ObsidianIngester:
             model_name = f"{model_name}:multilingual"
         
         logger.info(f"Initializing fastembed with model: {model_name}")
-        self.embedder = TextEmbedding(model_name=model_name)
-        logger.info("Embedder initialized successfully")
+        threads = max(1, int(os.getenv("EMBEDDING_THREADS", "1")))
+        self.embedder = TextEmbedding(model_name=model_name, threads=threads)
+        logger.info("Embedder initialized successfully (threads=%s)", threads)
     
     def _init_database(self):
         """Initialize LanceDB with hybrid search."""
@@ -220,6 +234,140 @@ class ObsidianIngester:
         
         return None
     
+    def _align_arrow_table_to_existing(self, table, table_data: pa.Table) -> pa.Table:
+        """Match an existing Lance table schema (fill missing metadata columns with '')."""
+        arrays = []
+        row_count = table_data.num_rows
+        for field in table.schema:
+            name = field.name
+            if name in table_data.schema.names:
+                arrays.append(table_data[name])
+            else:
+                arrays.append(pa.array([""] * row_count, type=pa.string()))
+        return pa.Table.from_arrays(arrays, schema=table.schema)
+
+    def _chunks_to_arrow_table(
+        self,
+        chunk_batch: list[dict],
+        embeddings: list,
+        metadata_keys: set[str],
+    ) -> pa.Table:
+        """Build a pyarrow table for one embed batch (bounded memory)."""
+        if not PYARROW_AVAILABLE:
+            raise ImportError("pyarrow is required for LanceDB. Install with: pip install pyarrow")
+
+        vectors = [emb.tolist() if hasattr(emb, "tolist") else list(emb) for emb in embeddings]
+        texts = [c["text"] for c in chunk_batch]
+        sorted_keys = sorted(metadata_keys)
+        metadata_dict: dict[str, list[str]] = {}
+        for key in sorted_keys:
+            values: list[str] = []
+            for chunk in chunk_batch:
+                value = chunk["metadata"].get(key)
+                if isinstance(value, list):
+                    values.append(", ".join(str(v) for v in value))
+                elif value is None:
+                    values.append("")
+                else:
+                    values.append(str(value))
+            metadata_dict[key] = values
+
+        schema_fields = [
+            pa.field("vector", pa.list_(pa.float32())),
+            pa.field("text", pa.string()),
+        ]
+        for key in sorted_keys:
+            schema_fields.append(pa.field(key, pa.string()))
+        schema = pa.schema(schema_fields)
+
+        arrays = [
+            pa.array(vectors, type=pa.list_(pa.float32())),
+            pa.array(texts, type=pa.string()),
+        ]
+        for key in sorted_keys:
+            arrays.append(pa.array(metadata_dict[key], type=pa.string()))
+        return pa.Table.from_arrays(arrays, schema=schema)
+
+    def _flush_chunk_batch(
+        self,
+        batch: list[dict],
+        metadata_keys: set[str],
+        *,
+        trust_level: str,
+        batch_label: str = "",
+    ) -> int:
+        """Embed and insert one batch; clears batch in-place."""
+        if not batch:
+            return 0
+
+        for item in batch:
+            metadata_keys.update(item["metadata"].keys())
+
+        table = self.curated_table if trust_level == "curated" else self.raw_table
+        collection_name = (
+            OBSIDIAN_CURATED_COLLECTION if trust_level == "curated" else OBSIDIAN_RAW_COLLECTION
+        )
+        texts = [c["text"] for c in batch]
+        # Cap embed input length — huge mermaid/code sections explode ONNX RAM on CPU
+        embed_cap = MAX_EMBED_CHARS
+        embed_texts = [
+            (t[:embed_cap] if embed_cap and len(t) > embed_cap else t) for t in texts
+        ]
+        embeddings = list(self.embedder.embed(embed_texts))
+        table_data = self._chunks_to_arrow_table(batch, embeddings, metadata_keys)
+
+        if table is None:
+            logger.info(
+                "Creating %s table (%s, %d chunks)",
+                collection_name,
+                batch_label or "batch",
+                len(batch),
+            )
+            table = self.db.create_table(collection_name, table_data)
+            if trust_level == "curated":
+                self.curated_table = table
+            else:
+                self.raw_table = table
+        else:
+            aligned = self._align_arrow_table_to_existing(table, table_data)
+            table.add(aligned)
+
+        count = len(batch)
+        batch.clear()
+        del texts, embed_texts, embeddings, table_data
+        gc.collect()
+        return count
+
+    def _prepare_chunk_entry(
+        self,
+        chunk: dict,
+        file_path: Path,
+        trust_level: str,
+    ) -> dict:
+        chunk_text = chunk["text"]
+        chunk_meta = chunk["metadata"].copy()
+        chunk_meta["obsidian_uri"] = generate_obsidian_uri(
+            str(file_path),
+            chunk_meta.get("chunk_index", 0),
+            chunk_meta.get("section"),
+        )
+        chunk_meta["trust_level"] = trust_level
+        chunk_meta["deleted"] = "false"
+
+        if PRE_COMPUTE_CHUNK_SUMMARIES:
+            summary = self._compute_chunk_summary(chunk_text)
+            if summary:
+                chunk_meta["chunk_summary"] = summary
+
+        if USE_LLMLINGUA and LLMLINGUA_AVAILABLE and self.compressor:
+            try:
+                compressed = self.compressor.compress_prompt(chunk_text)
+                chunk_text = compressed if compressed else chunk_text
+            except Exception as e:
+                logger.warning(f"Compression failed: {e}")
+
+        return {"text": chunk_text, "metadata": chunk_meta}
+
     def _is_crystallized_file(self, file_path: Path) -> bool:
         """
         Check if a file is a crystallized note (from Crystallize feature).
@@ -487,6 +635,17 @@ class ObsidianIngester:
             # Read content
             content = file_path.read_text(encoding='utf-8')
             body = strip_frontmatter(content)
+            del content
+
+            max_body = self.max_body_chars
+            if max_body and len(body) > max_body:
+                logger.warning(
+                    "Truncating %s body %d -> %d chars for ingest memory",
+                    file_path.name,
+                    len(body),
+                    max_body,
+                )
+                body = body[:max_body] + "\n\n…[truncated for ingest memory]…\n"
             
             # Determine trust level
             trust_level = self._determine_trust_level(metadata, file_path)
@@ -498,129 +657,69 @@ class ObsidianIngester:
                 overlap=OBSIDIAN_CHUNK_OVERLAP,
                 min_chunk_size=OBSIDIAN_MIN_CHUNK_SIZE
             )
+            del body
+
+            chunks = split_oversized_chunks(
+                chunks,
+                max_chars=MAX_EMBED_CHARS,
+                overlap=min(120, OBSIDIAN_CHUNK_OVERLAP),
+            )
+
+            max_chunks = self.max_chunks_per_note
+            if max_chunks is None and MAX_INGEST_CHUNKS_PER_NOTE:
+                max_chunks = MAX_INGEST_CHUNKS_PER_NOTE
+            if max_chunks and len(chunks) > max_chunks:
+                logger.warning(
+                    "Truncating %s %d -> %d chunks for ingest memory",
+                    file_path.name,
+                    len(chunks),
+                    max_chunks,
+                )
+                chunks = chunks[:max_chunks]
             
             if not chunks:
                 logger.warning(f"No chunks created for {file_path.name}")
                 return {"status": "skipped", "reason": "no_chunks"}
-            
-            # Process chunks
-            chunk_data = []
-            for chunk in chunks:
-                chunk_text = chunk['text']
-                chunk_meta = chunk['metadata'].copy()
-                
-                # Add obsidian URI
-                chunk_meta['obsidian_uri'] = generate_obsidian_uri(
-                    str(file_path),
-                    chunk_meta.get('chunk_index', 0),
-                    chunk_meta.get('section')
-                )
-                
-                # Add trust level
-                chunk_meta['trust_level'] = trust_level
-                
-                # Add soft-delete flag (default: false)
-                chunk_meta['deleted'] = 'false'
-                
-                # Pre-compute summary
-                if PRE_COMPUTE_CHUNK_SUMMARIES:
-                    summary = self._compute_chunk_summary(chunk_text)
-                    if summary:
-                        chunk_meta['chunk_summary'] = summary
-                
-                # Compress if enabled
-                if USE_LLMLINGUA and LLMLINGUA_AVAILABLE and self.compressor:
-                    try:
-                        compressed = self.compressor.compress_prompt(chunk_text)
-                        chunk_text = compressed if compressed else chunk_text
-                    except Exception as e:
-                        logger.warning(f"Compression failed: {e}")
-                
-                chunk_data.append({
-                    'text': chunk_text,
-                    'metadata': chunk_meta
-                })
-            
-            # Embed chunks
-            texts = [c['text'] for c in chunk_data]
-            embeddings = list(self.embedder.embed(texts))
-            
-            # Prepare data for LanceDB
-            table = self.curated_table if trust_level == "curated" else self.raw_table
-            
-            # Convert to LanceDB format (pyarrow table)
-            if not PYARROW_AVAILABLE:
-                raise ImportError("pyarrow is required for LanceDB. Install with: pip install pyarrow")
-            
-            # Prepare data arrays
-            vectors = [emb.tolist() if hasattr(emb, 'tolist') else list(emb) for emb in embeddings]
-            texts = [c['text'] for c in chunk_data]
-            
-            # Collect all metadata keys from all chunks
-            all_metadata_keys = set()
-            for chunk in chunk_data:
-                all_metadata_keys.update(chunk['metadata'].keys())
-            
-            # Prepare metadata columns
-            metadata_dict = {}
-            for key in sorted(all_metadata_keys):  # Sort for consistency
-                values = []
-                for chunk in chunk_data:
-                    value = chunk['metadata'].get(key, None)
-                    # Convert lists to strings for LanceDB
-                    if isinstance(value, list):
-                        values.append(', '.join(str(v) for v in value))
-                    elif value is None:
-                        values.append('')
-                    else:
-                        values.append(str(value))
-                metadata_dict[key] = values
-            
-            # Create pyarrow schema
-            schema_fields = [
-                pa.field('vector', pa.list_(pa.float32())),
-                pa.field('text', pa.string())
-            ]
-            for key in sorted(metadata_dict.keys()):  # Sort for consistency
-                schema_fields.append(pa.field(key, pa.string()))
-            
-            schema = pa.schema(schema_fields)
-            
-            # Create arrays
-            arrays = [
-                pa.array(vectors, type=pa.list_(pa.float32())),
-                pa.array(texts, type=pa.string())
-            ]
-            for key in sorted(metadata_dict.keys()):  # Sort for consistency
-                arrays.append(pa.array(metadata_dict[key], type=pa.string()))
-            
-            # Create pyarrow table
-            table_data = pa.Table.from_arrays(arrays, schema=schema)
-            
-            # Insert into LanceDB
-            collection_name = OBSIDIAN_CURATED_COLLECTION if trust_level == "curated" else OBSIDIAN_RAW_COLLECTION
-            
-            if table is None:
-                # Create table on first insert
-                logger.info(f"Creating {collection_name} table with {len(chunk_data)} chunks")
-                table = self.db.create_table(collection_name, table_data)
-                if trust_level == "curated":
-                    self.curated_table = table
-                else:
-                    self.raw_table = table
-            else:
-                # Add to existing table
-                logger.debug(f"Adding {len(chunk_data)} chunks to existing {collection_name} table")
-                table.add(table_data)
-            
+
+            pending: list[dict] = []
+            metadata_keys: set[str] = set()
+            inserted = 0
+            total_chunks = len(chunks)
+            logger.info(
+                "Embedding %s: %d chunks (batch=%d, embed_cap=%d)",
+                file_path.name,
+                total_chunks,
+                self.embed_batch_size,
+                MAX_EMBED_CHARS,
+            )
+
+            for idx, chunk in enumerate(chunks):
+                pending.append(self._prepare_chunk_entry(chunk, file_path, trust_level))
+                if len(pending) >= self.embed_batch_size:
+                    inserted += self._flush_chunk_batch(
+                        pending,
+                        metadata_keys,
+                        trust_level=trust_level,
+                        batch_label=f"{file_path.name} {idx + 1}/{total_chunks}",
+                    )
+
+            inserted += self._flush_chunk_batch(
+                pending,
+                metadata_keys,
+                trust_level=trust_level,
+                batch_label=f"{file_path.name} tail",
+            )
+            del chunks, pending, metadata_keys
+            gc.collect()
+
             # Record in ledger
-            self.ledger.record_ingestion(file_path, len(chunks))
+            self.ledger.record_ingestion(file_path, inserted)
             
-            logger.info(f"Ingested {file_path.name}: {len(chunks)} chunks ({trust_level})")
+            logger.info(f"Ingested {file_path.name}: {inserted} chunks ({trust_level})")
             
             return {
                 "status": "success",
-                "chunks": len(chunks),
+                "chunks": inserted,
                 "trust_level": trust_level,
                 "file": str(file_path)
             }

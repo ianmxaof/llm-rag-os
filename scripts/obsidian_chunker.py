@@ -88,6 +88,61 @@ def chunk_by_headings(
     return chunks
 
 
+def split_oversized_chunks(
+    chunks: List[Dict[str, Any]],
+    max_chars: int = 1600,
+    overlap: int = 120,
+) -> List[Dict[str, Any]]:
+    """Split heading chunks that exceed max_chars into fixed windows (CPU/ONNX RAM guard)."""
+    if max_chars <= 0 or not chunks:
+        return chunks
+
+    out: List[Dict[str, Any]] = []
+    step = max(1, max_chars - max(0, overlap))
+
+    for chunk in chunks:
+        text = chunk.get("text") or ""
+        if len(text) <= max_chars:
+            out.append(chunk)
+            continue
+        meta_base = dict(chunk.get("metadata") or {})
+        part = 0
+        for start in range(0, len(text), step):
+            piece = text[start : start + max_chars]
+            if not piece.strip():
+                continue
+            meta = meta_base.copy()
+            section = meta.get("section") or ""
+            if section:
+                meta["section"] = f"{section} (part {part + 1})"
+            meta["split_from_oversized"] = "true"
+            out.append({"text": piece, "metadata": meta})
+            part += 1
+
+    for idx, chunk in enumerate(out):
+        chunk["metadata"]["chunk_index"] = idx
+        chunk["metadata"]["total_chunks"] = len(out)
+    return out
+
+
+def _vault_relative_path(file_path: str) -> str:
+    """Return a vault-relative POSIX path for obsidian:// and CLI read/create."""
+    from scripts.config import resolve_obsidian_vault_path
+
+    raw = Path(file_path)
+    vault = resolve_obsidian_vault_path()
+    try:
+        return raw.resolve().relative_to(vault).as_posix()
+    except (OSError, ValueError):
+        pass
+
+    normalized = str(file_path).replace("\\", "/")
+    marker = "knowledge/notes/"
+    if marker in normalized:
+        return normalized.split(marker, 1)[-1]
+    return raw.name
+
+
 def generate_obsidian_uri(file_path: str, chunk_index: int, section: str = None) -> str:
     """
     Generate obsidian:// URI for deep linking to specific section.
@@ -100,26 +155,12 @@ def generate_obsidian_uri(file_path: str, chunk_index: int, section: str = None)
     Returns:
         obsidian:// URI string
     """
-    import urllib.parse
-    
-    # Convert Windows path to Obsidian vault-relative path
-    # Assuming vault root is knowledge/notes/
-    file_path_normalized = file_path.replace('\\', '/')
-    
-    if 'knowledge/notes/' in file_path_normalized:
-        rel_path = file_path_normalized.split('knowledge/notes/')[-1]
-    elif 'knowledge\\notes\\' in file_path:
-        rel_path = file_path.split('knowledge\\notes\\')[-1].replace('\\', '/')
-    else:
-        # Try to extract relative path
-        rel_path = Path(file_path).name
-    
-    # URL encode the path
+    from scripts.config import resolve_obsidian_vault_name
+
+    rel_path = _vault_relative_path(file_path)
     rel_path_encoded = urllib.parse.quote(rel_path)
-    
-    # Build URI (Obsidian uses vault name, not full path)
-    # For now, use file parameter - vault detection happens in Obsidian
-    uri = f"obsidian://open?file={rel_path_encoded}"
+    vault_encoded = urllib.parse.quote(resolve_obsidian_vault_name())
+    uri = f"obsidian://open?vault={vault_encoded}&file={rel_path_encoded}"
     
     # Add block reference if section provided
     if section:

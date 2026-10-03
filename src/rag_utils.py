@@ -20,7 +20,20 @@ from scripts.config import (
     config,
     PROMPT_RAG_ENABLED,
     USE_TOON_SERIALIZATION,
+    RAG_VECTOR_BACKEND,
 )
+
+# Import Powercore model loader
+try:
+    from src.app.utils.model_loader import (
+        is_gguf_path,
+        get_or_load_model,
+        generate_with_gguf
+    )
+    MODEL_LOADER_AVAILABLE = True
+except ImportError:
+    MODEL_LOADER_AVAILABLE = False
+    logger.warning("Powercore model loader not available. GGUF support disabled.")
 
 # Import Prompt RAG module
 try:
@@ -63,31 +76,23 @@ def _get_collection():
     return client.get_or_create_collection(config.COLLECTION_NAME)
 
 
-def retrieve_context(
+def _retrieve_context_chroma(
     question: str, k: int = DEFAULT_K
 ) -> Tuple[str, List[Dict], List[str], List[float]]:
-    """
-    Retrieve context from ChromaDB with similarity scores.
-    
-    Returns:
-        Tuple of (formatted_context, metadatas, documents, distances)
-        distances can be converted to similarities: similarity = 1 - distance
-    """
+    """Legacy ChromaDB retrieval (Ollama embeddings)."""
     collection = _get_collection()
     query_embedding = embed_texts([question])
-    
-    # Check embedding dimension
+
     if not query_embedding or len(query_embedding) == 0:
         raise ValueError("Failed to generate query embedding")
-    
+
     embedding_dim = len(query_embedding[0])
-    
+
     try:
         results = collection.query(query_embeddings=query_embedding, n_results=k)
     except Exception as e:
         error_msg = str(e)
         if "dimension" in error_msg.lower():
-            # Try to get collection info to provide better error message
             try:
                 count = collection.count()
                 raise ValueError(
@@ -95,19 +100,57 @@ def retrieve_context(
                     f"Collection has {count} items. You may need to delete the collection and re-ingest documents.\n"
                     f"To fix: Delete the ChromaDB collection at {CHROMA_PATH} and re-ingest your documents."
                 )
-            except:
+            except ValueError:
+                raise
+            except Exception:
                 raise ValueError(
                     f"Embedding dimension mismatch: {error_msg}\n"
                     f"Generated embedding has dimension {embedding_dim}.\n"
                     f"To fix: Delete the ChromaDB collection at {CHROMA_PATH} and re-ingest your documents."
                 )
         raise
-    
+
     documents = results.get("documents", [[]])[0]
     metadatas = results.get("metadatas", [[]])[0]
     distances = results.get("distances", [[]])[0] if results.get("distances") else [1.0] * len(documents)
     formatted = format_context(documents, metadatas)
     return formatted, metadatas, documents, distances
+
+
+def _should_use_lance_backend() -> bool:
+    backend = (RAG_VECTOR_BACKEND or "auto").lower()
+    if backend == "chroma":
+        return False
+    if backend == "lance":
+        return True
+    # auto: prefer Lance when Obsidian tables have data
+    try:
+        from src.obsidian_lance_retrieval import lance_obsidian_available
+
+        return lance_obsidian_available()
+    except Exception as exc:
+        logger.debug("Lance auto-detect failed: %s", exc)
+        return False
+
+
+def retrieve_context(
+    question: str, k: int = DEFAULT_K
+) -> Tuple[str, List[Dict], List[str], List[float]]:
+    """
+    Retrieve context for RAG (Streamlit, obsidian_bridge, answer_question).
+
+    Default (RAG_VECTOR_BACKEND=auto): LanceDB Obsidian index when populated,
+    otherwise legacy ChromaDB.
+    """
+    if _should_use_lance_backend():
+        try:
+            from src.obsidian_lance_retrieval import retrieve_obsidian_context
+
+            return retrieve_obsidian_context(question, k=k)
+        except Exception as exc:
+            logger.warning("Lance retrieval failed, falling back to Chroma: %s", exc)
+
+    return _retrieve_context_chroma(question, k=k)
 
 
 def format_context(docs: List[str], metas: List[Dict]) -> str:
@@ -236,15 +279,18 @@ def build_prompt(question: str, context: str) -> str:
     )
 
 
-def call_local_model(messages: List[Dict]) -> str:
+def call_local_model(messages: List[Dict], model: Optional[str] = None) -> str:
     """
-    Call Ollama chat API using the chat function from backend.controllers.ollama.
+    Call local model (GGUF via llama-cpp-python or Ollama via API).
     
-    Note: This function signature is kept for compatibility, but now uses Ollama
-    instead of LM Studio. The messages array is converted to a single prompt string.
+    Note: This function signature is kept for compatibility, but now supports
+    both GGUF files and Ollama models. The messages array is converted to a single prompt string.
+    
+    Args:
+        messages: List of message dictionaries
+        model: Optional model identifier (GGUF path or Ollama model name)
     """
     # Extract the user message from the messages array
-    # (Ollama expects a single prompt string, not a messages array)
     if messages and len(messages) > 0:
         # Get the last user message (or combine all messages)
         prompt = messages[-1].get("content", "")
@@ -254,8 +300,24 @@ def call_local_model(messages: List[Dict]) -> str:
     else:
         raise ValueError("No messages provided")
     
-    # Call Ollama chat function
-    return ollama_chat(prompt, model=config.OLLAMA_CHAT_MODEL, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
+    model = model or config.OLLAMA_CHAT_MODEL
+    
+    # Check if model is a GGUF path
+    if MODEL_LOADER_AVAILABLE and is_gguf_path(model):
+        # Load and use GGUF model
+        model_instance = get_or_load_model(model)
+        if model_instance:
+            return generate_with_gguf(
+                model_instance,
+                prompt,
+                temperature=0.7,
+                max_tokens=2000
+            )
+        else:
+            logger.warning(f"Failed to load GGUF model {model}, falling back to Ollama")
+    
+    # Fallback to Ollama API
+    return ollama_chat(prompt, model=model, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
 
 
 def answer_question(
@@ -280,10 +342,25 @@ def answer_question(
     """
     model = model or config.OLLAMA_CHAT_MODEL
     
+    # Helper function to call model (GGUF or Ollama)
+    def _call_model(prompt_text: str, model_name: str) -> str:
+        """Call model via GGUF loader or Ollama API."""
+        if MODEL_LOADER_AVAILABLE and is_gguf_path(model_name):
+            model_instance = get_or_load_model(model_name)
+            if model_instance:
+                return generate_with_gguf(
+                    model_instance,
+                    prompt_text,
+                    temperature=0.7,
+                    max_tokens=2000
+                )
+        # Fallback to Ollama
+        return ollama_chat(prompt_text, model=model_name, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
+    
     # Pure uncensored mode: Skip RAG entirely
     if raw_mode:
-        # Direct Ollama call with no context, no Prompt RAG
-        answer = ollama_chat(question, model=model, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
+        # Direct model call with no context, no Prompt RAG
+        answer = _call_model(question, model)
         return {
             "response": answer,
             "sources": [],
@@ -305,11 +382,9 @@ def answer_question(
         # Auto-fallback: Skip RAG if relevance is too low
         if max_similarity < rag_threshold:
             # Use pure model with a note about skipping RAG
-            answer = ollama_chat(
+            answer = _call_model(
                 f"{question}\n\n(Note: Low relevance docs skipped for clarity.)",
-                model=model,
-                stream=False,
-                timeout=int(LOCAL_MODEL_TIMEOUT)
+                model
             )
             return {
                 "response": answer,
@@ -322,8 +397,8 @@ def answer_question(
         
         # Full RAG mode: Use context with Prompt RAG augmentation
         prompt = build_prompt(question, context)
-        # Call Ollama directly with model parameter
-        answer = ollama_chat(prompt, model=model, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
+        # Call model (GGUF or Ollama)
+        answer = _call_model(prompt, model)
         
         return {
             "response": answer,
@@ -337,7 +412,15 @@ def answer_question(
     except Exception as e:
         # Fallback to raw mode on error
         logger.error(f"RAG retrieval failed, falling back to raw mode: {e}")
-        answer = ollama_chat(question, model=model, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
+        # Use helper function for model call
+        if MODEL_LOADER_AVAILABLE and is_gguf_path(model):
+            model_instance = get_or_load_model(model)
+            if model_instance:
+                answer = generate_with_gguf(model_instance, question, temperature=0.7, max_tokens=2000)
+            else:
+                answer = ollama_chat(question, model=model, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
+        else:
+            answer = ollama_chat(question, model=model, stream=False, timeout=int(LOCAL_MODEL_TIMEOUT))
         return {
             "response": answer,
             "sources": [],

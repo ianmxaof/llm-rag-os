@@ -7,7 +7,7 @@ pyyaml>=6.0               # YAML parsing
 lancedb>=0.4.0           # Vector DB (required, not optional)
 pyarrow>=14.0.0          # Required for LanceDB
 tantivy>=0.20.0          # Full-text search index (for BM25 hybrid search)
-fastembed>=0.2.0         # Embeddings (default, 3-6x faster than sentence-transformers)
+fastembed>=0.2.0         # Embeddings (nomic-embed-text-v1.5-Q) + jina-reranker-v1-turbo-en
 
 # Optional but recommended
 llmlingua>=2.0.0         # LLMLingua-2 compression (30-50% storage reduction)
@@ -17,7 +17,7 @@ uvicorn>=0.24.0          # FastAPI server
 httpx>=0.25.0            # For Ollama API calls and FastAPI client requests
 
 # Optional enhancements
-# bge-reranker-v2-m3     # Reranking (CPU-only, <100ms) - install separately if needed
+# Neural rerank uses fastembed TextCrossEncoder (jinaai/jina-reranker-v1-turbo-en) — no extra package.
 
 # Note: sqlite3 is built into Python, no installation needed
 

@@ -44,7 +44,7 @@ class Config(BaseModel):
     CONFIG_PATH: Path = ROOT / "config" / "sources.json"
     
     # Embedding model settings
-    EMBED_MODEL: str = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-small-en-v1.5")
+    EMBED_MODEL: str = os.getenv("EMBED_MODEL_NAME", "nomic-ai/nomic-embed-text-v1.5-Q")
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1500"))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     EMBED_BATCH_SIZE: int = int(os.getenv("EMBED_BATCH_SIZE", "32"))
@@ -138,7 +138,7 @@ else:
         'ERROR_DIR': Path(__file__).resolve().parent.parent / "knowledge" / "error",
         'VECTOR_DIR': Path(__file__).resolve().parent.parent / "chroma",
         'CONFIG_PATH': Path(__file__).resolve().parent.parent / "config" / "sources.json",
-        'EMBED_MODEL': os.getenv("EMBED_MODEL_NAME", "BAAI/bge-small-en-v1.5"),
+        'EMBED_MODEL': os.getenv("EMBED_MODEL_NAME", "nomic-ai/nomic-embed-text-v1.5-Q"),
         'CHUNK_SIZE': int(os.getenv("CHUNK_SIZE", "1500")),
         'CHUNK_OVERLAP': int(os.getenv("CHUNK_OVERLAP", "200")),
         'EMBED_BATCH_SIZE': int(os.getenv("EMBED_BATCH_SIZE", "32")),
@@ -168,10 +168,43 @@ else:
 NOTES_VAULT = "knowledge/notes/"
 AUTO_FOLDER = "knowledge/notes/Auto/"
 
-# Obsidian watch paths (selective watching)
+# Official Obsidian CLI + obsidian:// links. Pin to the second-brain vault
+# (knowledge/notes). Do not use llm-rag/knowledge — that parent folder is a
+# separate registered vault and would steal CLI commands run from cwd.
+_LLM_RAG_ROOT = Path(__file__).resolve().parent.parent
+
+
+def resolve_obsidian_vault_path() -> Path:
+    raw = (os.getenv("OBSIDIAN_VAULT_PATH") or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return (_LLM_RAG_ROOT / "knowledge" / "notes").resolve()
+
+
+def resolve_obsidian_vault_name() -> str:
+    raw = (os.getenv("OBSIDIAN_VAULT_NAME") or "").strip()
+    if raw:
+        return raw
+    return resolve_obsidian_vault_path().name
+
+
+OBSIDIAN_VAULT_PATH = resolve_obsidian_vault_path()
+OBSIDIAN_VAULT_NAME = resolve_obsidian_vault_name()
+
+# High-signal PARA folders for agent crews (Python Lance). Not Obsidian plugins.
 OBSIDIAN_WATCH_DIRS = [
+    "knowledge/inbox/",
+    "knowledge/notes/0-Inbox/",
+    "knowledge/notes/1-Projects/",
+    "knowledge/notes/2-Areas/",
+    "knowledge/notes/3-Resources/second-brain/",
+    "knowledge/notes/3-Resources/Userscripts/",
+    "knowledge/notes/3-Resources/Dev-Chats/",
+    "knowledge/notes/3-Resources/Revenue/",
     "knowledge/notes/Manual/",
-    "knowledge/notes/Auto/"
+    "knowledge/notes/TBCC/",
+    "knowledge/notes/AI-Runbooks/",
+    "knowledge/notes/Reference/",
 ]
 OBSIDIAN_EXCLUDE_DIRS = [
     "Templates/",
@@ -180,24 +213,41 @@ OBSIDIAN_EXCLUDE_DIRS = [
     ".obsidian/",
     "_dashboard/",
     "_templates/",
-    "_attachments/"
+    "_attachments/",
+    "_secrets_pulled/",
+    ".claude/",
+    ".copilot/",
+    ".smart-env/",
+    "Copilot/",
+    ".agents/",
+    ".opencode/",
+    ".claudian/",
+    "Eni-main/",
+    "8-22-26 DOC DUMP/",
 ]
-OBSIDIAN_RECURSIVE = False  # Only watch specified folders, not subfolders
+OBSIDIAN_RECURSIVE = True  # Crews need project/area subfolders, not only top-level notes
 
 # Chunking settings (Obsidian-specific)
 OBSIDIAN_CHUNK_OVERLAP = 150  # Characters (optimized for heading-based chunking)
 OBSIDIAN_MIN_CHUNK_SIZE = 200  # Characters
 OBSIDIAN_CHUNK_BY_HEADINGS = True
 
-# Embedding model (fastembed default)
-OBSIDIAN_EMBED_MODEL = "nomic-embed-text-v1.5"  # 384-dim via fastembed
-OBSIDIAN_EMBED_MULTILINGUAL = True  # Use :multilingual flag for non-English sources
+# Embedding model (fastembed). nomic v1.5-Q: 768-d, long context, ~130MB ONNX — fits this CPU box.
+# Live index: data/lancedb_obsidian_nomicq. Compact with scripts/compact_obsidian_lancedb.py.
+OBSIDIAN_EMBED_MODEL = os.getenv("OBSIDIAN_EMBED_MODEL", "nomic-ai/nomic-embed-text-v1.5-Q")
+OBSIDIAN_EMBED_MULTILINGUAL = False  # nomic v1.5 already handles mixed English notes
 OBSIDIAN_EMBED_PROVIDER = "fastembed"  # Required, not optional
-# Alternative: "BAAI/bge-micro-v2"
 
-# Vector DB (LanceDB required)
+# Vector DB (LanceDB required for Obsidian ingest)
 USE_LANCEDB = True  # Required for elite setup
-LANCE_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "lancedb_obsidian"
+LANCE_DB_PATH = Path(
+    os.getenv(
+        "LANCE_DB_PATH",
+        str(Path(__file__).resolve().parent.parent / "data" / "lancedb_obsidian_nomicq"),
+    )
+)
+# Streamlit / rag_utils: auto = Lance Obsidian when populated, else Chroma legacy
+RAG_VECTOR_BACKEND = os.getenv("RAG_VECTOR_BACKEND", "auto").lower()
 ENABLE_HYBRID_SEARCH = True  # BM25 + vector hybrid
 TANTIVY_INDEX_PATH = Path(__file__).resolve().parent.parent / "data" / "tantivy_obsidian"
 
@@ -213,18 +263,28 @@ INGESTION_LEDGER_PATH = Path(__file__).resolve().parent.parent / "data" / "obsid
 USE_LLMLINGUA = os.getenv("USE_LLMLINGUA", "true").lower() == "true"  # LLMLingua-2 compression
 USE_TOON_SERIALIZATION = os.getenv("USE_TOON_SERIALIZATION", "true").lower() == "true"  # TOON format for contexts (35-45% token savings)
 
-# Reranking
+# Reranking (fastembed TextCrossEncoder). v2-m3 is not in fastembed's list and is ~1GB.
+# jina turbo: ~150MB, 8k context, Apache-2.0, English notes.
 USE_RERANKER = os.getenv("USE_RERANKER", "true").lower() == "true"
-RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")  # CPU-only, <100ms
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "jinaai/jina-reranker-v1-turbo-en")
 
 # Chunk Summarization (pre-compute on ingest)
-PRE_COMPUTE_CHUNK_SUMMARIES = os.getenv("PRE_COMPUTE_CHUNK_SUMMARIES", "true").lower() == "true"  # Generate summaries via Ollama on ingest, cache for Streamlit
+PRE_COMPUTE_CHUNK_SUMMARIES = os.getenv("PRE_COMPUTE_CHUNK_SUMMARIES", "false").lower() == "true"
 CHUNK_SUMMARY_MODEL = os.getenv("CHUNK_SUMMARY_MODEL", "mistral:7b-instruct-q5_K_M")  # Or your preferred Ollama model
 CHUNK_SUMMARY_MAX_TOKENS = int(os.getenv("CHUNK_SUMMARY_MAX_TOKENS", "50"))  # Brief summary per chunk
 
 # Performance
 EMBEDDING_WORKERS = int(os.getenv("EMBEDDING_WORKERS", "2"))  # Multi-process embedding queue (2-4 workers)
 # Turns 15 docs/s → 60+ docs/s on 256GB laptop
+# Chunks embedded per batch (lower = less RAM on huge transcripts)
+EMBEDDING_BATCH_SIZE = max(1, int(os.getenv("EMBEDDING_BATCH_SIZE", "32")))
+# Memory-safe bulk ingest caps (0 = unlimited)
+MAX_INGEST_BODY_CHARS = max(10_000, int(os.getenv("MAX_INGEST_BODY_CHARS", "120000")))
+MAX_INGEST_CHUNKS_PER_NOTE = max(0, int(os.getenv("MAX_INGEST_CHUNKS_PER_NOTE", "0")))
+MEMORY_SAFE_MAX_CHUNKS = max(20, int(os.getenv("MEMORY_SAFE_MAX_CHUNKS", "100")))
+# Hard cap on chars sent to the embedder per chunk (long mermaid/code blocks OOM ONNX on 16GB)
+MAX_EMBED_CHARS = max(400, int(os.getenv("MAX_EMBED_CHARS", "1600")))
+MEMORY_SAFE_EMBED_BATCH = max(1, int(os.getenv("MEMORY_SAFE_EMBED_BATCH", "1")))
 
 # FastAPI Reindex Endpoint (optional)
 ENABLE_REINDEX_API = os.getenv("ENABLE_REINDEX_API", "true").lower() == "true"  # Expose /reindex?file=xxx endpoint
@@ -239,3 +299,5 @@ PROMPT_MAX_CHARS = int(os.getenv("PROMPT_MAX_CHARS", "1500"))  # Hard cap on inj
 PROMPT_CACHE_TTL = int(os.getenv("PROMPT_CACHE_TTL", "60"))  # Cache TTL in seconds
 PROMPT_SCORE_DECAY_DAYS = int(os.getenv("PROMPT_SCORE_DECAY_DAYS", "90"))  # Score decay after N days unused
 
+# Module-level aliases (obsidian_rag_ingester imports)
+OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/api")

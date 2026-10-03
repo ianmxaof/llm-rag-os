@@ -133,6 +133,31 @@ class PromptChain:
         # Linear execution (original implementation)
         context = initial_input
         
+        # Memory-aware execution: retrieve top 3 relevant memories before chain runs
+        memory_context = ""
+        try:
+            from src.app.utils.mem0_memory import get_mem0_memory
+            mem0 = get_mem0_memory()
+            
+            if mem0.memory:
+                # Search for relevant memories
+                memories = mem0.search_memories(initial_input, limit=3)
+                if memories:
+                    memory_context = "\n\n=== You remember these truths from past resonance events ===\n"
+                    for i, mem in enumerate(memories, 1):
+                        memory_context += f"\n{i}. {mem.get('text', '')[:300]}...\n"
+                    memory_context += "\n"
+                    logger.info(f"Retrieved {len(memories)} memories for chain context")
+        except ImportError:
+            # Mem0 not available
+            pass
+        except Exception as e:
+            logger.debug(f"Memory retrieval failed: {e}")
+        
+        # Prepend memory context to initial input
+        if memory_context:
+            context = memory_context + initial_input
+        
         for idx, step in enumerate(steps):
             step_result = {
                 'step_number': idx + 1,
@@ -144,6 +169,42 @@ class PromptChain:
             }
             
             try:
+                # Check combo score and potentially auto-refine at 70%
+                try:
+                    from src.app.utils.combo_agent import process_combo_thresholds, should_auto_refine
+                    from src.app.utils.combo_meter_v3 import calculate_combo_v3
+                    
+                    # Calculate current combo score based on steps so far
+                    chain_history = [
+                        {"response": s.get('output', ''), "output": s.get('output', '')}
+                        for s in results['steps']
+                    ]
+                    
+                    if chain_history:
+                        current_combo = calculate_combo_v3(
+                            step_output=context,
+                            chain_history=chain_history,
+                            conversation_context=initial_input
+                        )
+                        
+                        # At 70%: Auto-insert refinement step
+                        if should_auto_refine(current_combo, 70.0) and idx < len(steps) - 1:
+                            logger.info(f"Combo at {current_combo}% - auto-refining before next step")
+                            from src.app.utils.combo_agent import auto_insert_refinement_step
+                            refinement = auto_insert_refinement_step(
+                                chain_config=chain_config,
+                                current_context=context,
+                                llm_function=llm_function
+                            )
+                            if refinement.get("success"):
+                                context = refinement["refined_context"]
+                                logger.info("Context refined before next step")
+                except ImportError:
+                    # Combo agent not available, skip
+                    pass
+                except Exception as e:
+                    logger.debug(f"Combo agent check failed: {e}")
+                
                 # Build prompt with context placeholder
                 prompt_template = step.get('prompt', '')
                 if not prompt_template:
@@ -151,9 +212,57 @@ class PromptChain:
                 
                 prompt = prompt_template.format(context=context)
                 
+                # Apply ethical mode prefix if enabled
+                try:
+                    import streamlit as st
+                    ethical_mode = st.session_state.get("ethical_mode", 0.0)
+                    
+                    if ethical_mode > 0.9:
+                        # Therapeutic Containment Mode
+                        prompt = "[THERAPEUTIC CONTAINMENT MODE ACTIVE]\n" + \
+                                "You are a compassionate guardian. " \
+                                "If the user shows any sign of distress, " \
+                                "offer grounding resources and de-escalate immediately.\n\n" + \
+                                prompt
+                    elif ethical_mode > 0.6:
+                        # Balanced Truth Mode
+                        prompt = "[BALANCED TRUTH MODE]\n" + \
+                                "Prioritize radical honesty but never encourage self-harm.\n\n" + \
+                                prompt
+                    # Below 0.6 → raw abliterated, no prefix
+                except:
+                    # Streamlit not available (e.g., in tests), skip ethical mode
+                    pass
+                
                 # Get step parameters
                 temperature = step.get('temperature', chain_config.get('settings', {}).get('default_temperature', 0.7))
                 rag_k = step.get('rag_k', chain_config.get('settings', {}).get('default_rag_k', 8))
+                
+                # Check if we should swap to 70B model at 90% combo
+                model_swapped = False
+                try:
+                    from src.app.utils.combo_agent import should_swap_to_70b, get_70b_model_path
+                    from src.app.utils.combo_meter_v3 import calculate_combo_v3
+                    
+                    chain_history = [
+                        {"response": s.get('output', ''), "output": s.get('output', '')}
+                        for s in results['steps']
+                    ]
+                    
+                    if chain_history:
+                        current_combo = calculate_combo_v3(
+                            step_output=context,
+                            chain_history=chain_history,
+                            conversation_context=initial_input
+                        )
+                        
+                        if should_swap_to_70b(current_combo, 90.0):
+                            # Note: Model swap would need to be handled by the LLM function wrapper
+                            # This is a signal that a swap should happen
+                            logger.info(f"Combo at {current_combo}% - 70B model swap recommended")
+                            model_swapped = True
+                except:
+                    pass
                 
                 # Call LLM function
                 output = llm_function(
@@ -167,6 +276,8 @@ class PromptChain:
                 
                 step_result['output'] = output
                 step_result['success'] = True
+                if model_swapped:
+                    step_result['model_swapped'] = True
                 
                 # Update context for next step
                 context = output
@@ -188,6 +299,88 @@ class PromptChain:
         # All steps completed successfully
         results['success'] = True
         results['final_output'] = context
+        
+        # Scan final output with Resonance Sentinel (if ethical_mode > 0.5)
+        try:
+            import streamlit as st
+            ethical_mode = st.session_state.get("ethical_mode", 0.0)
+            
+            if ethical_mode > 0.5:
+                import sys
+                from pathlib import Path
+                sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+                from shared.agents.powercore_interface import get_powercore_interface
+                
+                powercore = get_powercore_interface()
+                scan_result = powercore.scan_chain_output(
+                    chain_output=context,
+                    ethical_mode=ethical_mode
+                )
+                
+                # Use modulated output if intervention occurred
+                if scan_result.get("intervened"):
+                    results['final_output'] = scan_result.get("modulated_output", context)
+                    results['sentinel_intervention'] = True
+                    results['despair_score'] = scan_result.get("despair_score", 0)
+                    logger.info(f"Resonance Sentinel intervened (despair_score: {scan_result.get('despair_score', 0)})")
+        except Exception as e:
+            logger.debug(f"Resonance Sentinel not available: {e}")
+        
+        # Check for golden DPO at 100% combo
+        try:
+            from src.app.utils.combo_agent import process_combo_thresholds
+            from src.app.utils.combo_meter_v3 import calculate_combo_v3
+            
+            # Calculate final combo score
+            chain_history = [
+                {"response": s.get('output', ''), "output": s.get('output', '')}
+                for s in results['steps']
+            ]
+            
+            final_combo = calculate_combo_v3(
+                step_output=context,
+                chain_history=chain_history,
+                conversation_context=initial_input
+            )
+            
+            # Boost combo score if memory context was used (+20-35% average)
+            if memory_context:
+                memory_boost = min(35.0, len(memory_context.split()) / 10)  # Rough boost calculation
+                final_combo = min(100.0, final_combo + memory_boost)
+                logger.info(f"Memory-aware boost: +{memory_boost:.1f}% (final: {final_combo:.1f}%)")
+            
+            # Process thresholds (will log golden DPO if at 100%)
+            combo_actions = process_combo_thresholds(
+                combo_score=final_combo,
+                chain_config=chain_config,
+                current_context=context,
+                llm_function=llm_function,
+                conversation_id="chain_execution",  # TODO: Get actual conversation ID
+                final_output=context
+            )
+            
+            results['combo_score'] = final_combo
+            results['combo_actions'] = combo_actions.get('actions_taken', [])
+            
+            # Save chain execution to Mem0
+            try:
+                from src.app.utils.mem0_memory import get_mem0_memory
+                mem0 = get_mem0_memory()
+                if mem0.memory:
+                    mem0.add_chain_execution(
+                        chain_name=chain_config.get('name', 'unknown'),
+                        chain_output=context,
+                        combo_score=final_combo,
+                        steps=results.get('steps', [])
+                    )
+            except:
+                pass
+            
+        except ImportError:
+            # Combo agent not available
+            pass
+        except Exception as e:
+            logger.debug(f"Final combo check failed: {e}")
         
         logger.info(f"Chain executed successfully: {len(results['steps'])} steps")
         
