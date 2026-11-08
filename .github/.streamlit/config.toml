@@ -1,0 +1,14 @@
+# PowerCore Chrome — near-black (matches powercore-ops design tokens)
+[theme]
+base = "dark"
+primaryColor = "#22d3ee"
+backgroundColor = "#0a0a0b"
+secondaryBackgroundColor = "#121214"
+textColor = "#f4f4f5"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

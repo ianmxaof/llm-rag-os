@@ -4,10 +4,11 @@ FastAPI Client Utilities
 Helper functions for communicating with the FastAPI backend.
 """
 
+import os
 import requests
 from typing import Optional, Dict, List
 
-API_BASE = "http://127.0.0.1:8000"
+API_BASE = os.getenv("RAG_API_BASE", "http://127.0.0.1:8000").rstrip("/")
 
 
 def check_backend_available() -> bool:

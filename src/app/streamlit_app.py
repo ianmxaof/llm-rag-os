@@ -26,8 +26,8 @@ def safe_execute(func: Callable, fallback_value: Any, error_message: str) -> Any
         st.error(f"⚠️ {error_message}")
         return fallback_value
 
-# API base URL for backend requests
-API_BASE = "http://127.0.0.1:8000"
+# API base URL for backend requests (override when 8000 is taken)
+API_BASE = os.getenv("RAG_API_BASE", "http://127.0.0.1:8000").rstrip("/")
 
 # Add parent directory to path so we can import from src
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -52,9 +52,9 @@ from src.app.utils.memory_store import get_memory_streams, load_conversation_by_
 from typing import Callable, Any
 
 # === GLOBAL NAVIGATION STATE ===
-# Initialize navigation state early
+# Initialize navigation state early — Ops is the light landing (Obsidian optional)
 if "current_page" not in st.session_state:
-    st.session_state.current_page = "chat"
+    st.session_state.current_page = "ops"
 if "secondary_sidebar" not in st.session_state:
     st.session_state.secondary_sidebar = None  # None or {"name": str, "title": str}
 
@@ -90,7 +90,7 @@ if "session_id" not in st.session_state:
 if "conversation_id" not in st.session_state:
     st.session_state.conversation_id = f"conv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
 if "current_page" not in st.session_state:
-    st.session_state.current_page = "chat"
+    st.session_state.current_page = "ops"
 if "project_tag" not in st.session_state:
     st.session_state.project_tag = ""
 if "current_focus" not in st.session_state:
@@ -857,13 +857,12 @@ def render_documents_list():
             st.info("Backend connection required to load archived documents.")
 
 def render_knowledge_graph():
-    """Render Knowledge Graph view."""
-    st.markdown("""
-    <div style="background: rgba(15, 15, 15, 0.8); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 12px; margin: 8px 0; min-height: 120px; display: flex; align-items: center; justify-content: center; color: rgba(255, 255, 255, 0.4); font-size: 0.85rem;">
-        🌐 Graph View<br>
-        <small>Click to expand full graph</small>
-    </div>
-    """, unsafe_allow_html=True)
+    """Knowledge graph — digest↔source edges live on Corpus Desk."""
+    st.info("Graph moved to **Corpus Desk → Graph** (digest ↔ wikilink / path edges).")
+    if st.button("Open Corpus Desk Graph", key="kb_to_corpus_graph"):
+        st.session_state.current_page = "corpus"
+        st.session_state.secondary_sidebar = None
+        st.rerun()
 
 def render_visualize_panel():
     """Render Visualize panel - placeholder for now."""
@@ -986,9 +985,28 @@ def render_memory_streams_panel():
                 load_conversation(stream['id'])
 
 def render_ingest_panel():
-    """Render Ingest panel - placeholder for now."""
-    st.info("Ingest panel - coming soon")
-    # TODO: Extract ingest UI from ingest page
+    """Drop .md into knowledge/inbox and optionally trigger API ingest."""
+    st.caption("Save into knowledge/inbox — watcher / API can embed later.")
+    uploaded_file = st.file_uploader("Select .md", type=["md"], key="panel_ingest_upload")
+    if uploaded_file is not None:
+        inbox_path = Path(config.INBOX)
+        inbox_path.mkdir(parents=True, exist_ok=True)
+        save_path = inbox_path / uploaded_file.name
+        counter = 1
+        while save_path.exists():
+            stem, _, ext = uploaded_file.name.rpartition(".")
+            save_path = inbox_path / f"{stem or uploaded_file.name}_{counter}.{ext or 'md'}"
+            counter += 1
+        save_path.write_bytes(uploaded_file.getbuffer())
+        st.success(f"Saved `{save_path.name}` → inbox/")
+        if check_backend_available() and st.button(
+            f"Ingest `{save_path.name}` now", key="panel_ingest_now", type="primary"
+        ):
+            result = ingest_file(str(save_path.resolve()))
+            if result.get("success"):
+                st.success("Ingested")
+            else:
+                st.error(result.get("message", "Ingest failed"))
 
 def render_system_settings_panel():
     """Render System Settings panel."""
@@ -1817,12 +1835,15 @@ def render_sidebar_content():
 os.environ.setdefault("STREAMLIT_SERVER_MAX_REQUEST_SIZE", "0")
 os.environ.setdefault("STREAMLIT_SERVER_MAX_MESSAGE_SIZE", "0")
 
-# Page config - Claude/Grok Design Language
+# Page config — PowerCore Chrome (near-black), suite with powercore.app
 st.set_page_config(
-    page_title="Powercore Mind",
+    page_title="PowerCore Second Brain",
     layout="centered",
     initial_sidebar_state="expanded"
 )
+
+from src.app.powercore_chrome_theme import inject_powercore_chrome
+inject_powercore_chrome(st)
 
 # === SIDEBAR MUST BE RENDERED IMMEDIATELY AFTER set_page_config ===
 # In Streamlit v1.38+ with layout="centered", ANY st. command before sidebar kills it
@@ -1841,6 +1862,16 @@ with st.sidebar:
     # NAVIGATION BUTTONS - These change pages (close secondary)
     # ========================================================================
     
+    if st.button("Ops", key="nav_ops", use_container_width=True):
+        st.session_state.current_page = "ops"
+        st.session_state.secondary_sidebar = None
+        st.rerun()
+
+    if st.button("Corpus Desk", key="nav_corpus", use_container_width=True):
+        st.session_state.current_page = "corpus"
+        st.session_state.secondary_sidebar = None
+        st.rerun()
+
     if st.button("Chat", key="nav_chat", use_container_width=True):
         st.session_state.current_page = "chat"
         st.session_state.secondary_sidebar = None  # Close secondary
@@ -1856,10 +1887,7 @@ with st.sidebar:
         st.session_state.secondary_sidebar = None  # Close secondary
         st.rerun()
     
-    if st.button("Temporal Vault", key="nav_temporal", use_container_width=True):
-        st.session_state.current_page = "temporal_vault"
-        st.session_state.secondary_sidebar = None  # Close secondary
-        st.rerun()
+    # Temporal Vault (Mem0) hidden — soft-deprecated; not digest/ledger corpus UX
     
     st.markdown("---")
     
@@ -2155,17 +2183,17 @@ if "chat_logger" not in st.session_state:
         logger.warning(f"Failed to initialize ChatLogger: {e}")
         st.session_state.chat_logger = None
 
-# Claude/Grok Design Language CSS - Consolidated and moved after sidebar
+# Layout / component CSS (colors overridden by PowerCore Chrome layer above)
 st.markdown("""
 <style>
-    /* GROK.COM 2026 — PURE MONOCHROME + PURPLE */
+    /* PowerCore Second Brain — layout chrome (tokens in powercore_chrome_streamlit.css) */
     section[data-testid="stSidebar"] {
         width: 280px !important;
         min-width: 280px !important;
         max-width: 280px !important;
         flex-shrink: 0 !important;
-        background: #000 !important;
-        border-right: 1px solid #1a1a1a !important;
+        background: var(--pc-bg, #0a0a0b) !important;
+        border-right: 1px solid var(--pc-chrome, #2a2a30) !important;
         z-index: 1;
         transition: none !important;
         overflow-y: auto !important;  /* Ensure scrolling works */
@@ -2178,8 +2206,8 @@ st.markdown("""
         top: 0 !important;
         bottom: 0 !important;
         width: 520px !important;
-        background: #0a0a0a !important;
-        border-right: 1px solid #1a1a1a !important;
+        background: var(--pc-bg-elevated, #121214) !important;
+        border-right: 1px solid var(--pc-chrome, #2a2a30) !important;
         box-shadow: 8px 0 32px rgba(0,0,0,0.7) !important;
         z-index: 9999 !important;
         transform: translateX(-100%) !important;
@@ -2264,14 +2292,15 @@ st.markdown("""
     }
     
     .stSlider > div > div > div > div > div {
-        background: white !important;
-        box-shadow: 0 0 20px rgba(139, 92, 246, 0.4) !important;
+        background: var(--pc-accent-focus, #22d3ee) !important;
+        box-shadow: 0 0 12px rgba(34, 211, 238, 0.35) !important;
     }
     
     button[kind="primary"], .invent-law-btn {
-        background: #8b5cf6 !important;
-        color: white !important;
-        box-shadow: 0 0 20px rgba(139, 92, 246, 0.5) !important;
+        background: var(--pc-bg-overlay, #1a1a1e) !important;
+        color: var(--pc-fg, #f4f4f5) !important;
+        border: 1px solid var(--pc-chrome, #2a2a30) !important;
+        box-shadow: none !important;
     }
     
     /* Main container - centered with max-width 1200px */
@@ -2534,16 +2563,18 @@ st.markdown("""
     }
     
     .message-user {
-        background: #0066cc;
-        color: white;
+        background: var(--pc-bg-overlay, #1a1a1e);
+        border: 1px solid var(--pc-chrome, #2a2a30);
+        color: var(--pc-fg, #f4f4f5);
         margin-left: auto;
         margin-right: 0;
         text-align: right;
     }
     
     .message-assistant {
-        background: #2d2d2d;
-        color: #e0e0e0;
+        background: var(--pc-bg-elevated, #121214);
+        border: 1px solid var(--pc-chrome, #2a2a30);
+        color: var(--pc-fg, #f4f4f5);
         margin-left: 0;
         margin-right: auto;
     }
@@ -2791,9 +2822,9 @@ st.markdown("""
     
     /* Note link styles */
     .note-link {
-        color: #7c3aed !important;
+        color: var(--pc-accent-cyan, #22d3ee) !important;
         text-decoration: none;
-        border-bottom: 1px dashed rgba(124, 58, 237, 0.5);
+        border-bottom: 1px dashed rgba(34, 211, 238, 0.45);
         padding: 2px 4px;
         border-radius: 4px;
         display: inline-block;
@@ -2802,8 +2833,8 @@ st.markdown("""
     }
     
     .note-link:hover {
-        background: rgba(124, 58, 237, 0.1);
-        border-bottom: 1px solid #7c3aed;
+        background: rgba(34, 211, 238, 0.1);
+        border-bottom: 1px solid var(--pc-accent-cyan, #22d3ee);
     }
     
     /* RAG chunk styles */
@@ -2816,7 +2847,7 @@ st.markdown("""
     }
     
     .rag-chunk:hover {
-        border-color: rgba(124, 58, 237, 0.3);
+        border-color: var(--pc-accent-focus, #22d3ee);
         transform: translateX(2px);
     }
     
@@ -2874,7 +2905,11 @@ def get_ollama_status_safe():
 def render_header():
     """Render fixed top header bar with logo, controls, and menu."""
     # Centered logo above everything
-    st.markdown('<div class="header-logo-centered">🧠 Powercore Mind</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="header-logo-centered">PowerCore '
+        '<span class="pc-suite-badge">Second Brain</span></div>',
+        unsafe_allow_html=True,
+    )
     
     # All controls in one horizontal row - adjusted widths to prevent button wrapping
     col1, col2, col3, col4 = st.columns([2.5, 2, 2, 1.2])
@@ -2995,146 +3030,8 @@ def render_header():
         st.session_state.raw_mode = raw_mode
     
     with col4:
-        # INVENT LAW button - custom HTML/CSS for perfect height and alignment
-        st.markdown("""
-        <style>
-            .invent-law-btn {
-                height: 32px !important;
-                padding: 0 12px !important;
-                font-size: 13px !important;
-                font-weight: 600 !important;
-                line-height: 32px !important;
-                border-radius: 6px !important;
-                background: #FF375A !important;
-                color: white !important;
-                border: none !important;
-                cursor: pointer;
-                display: inline-flex;
-                align-items: center;
-                gap: 6px;
-                white-space: nowrap !important;
-                box-shadow: 0 2px 4px rgba(255, 55, 90, 0.3);
-                transition: all 0.2s ease;
-                font-family: inherit;
-            }
-            .invent-law-btn:hover {
-                background: #ff1f49 !important;
-                transform: translateY(-1px);
-                box-shadow: 0 4px 8px rgba(255, 55, 90, 0.4);
-            }
-            .invent-law-btn:active {
-                transform: translateY(0);
-            }
-            .invent-law-btn .icon {
-                font-size: 16px;
-                line-height: 1;
-            }
-        </style>
-        <div style="display: inline-block;">
-            <button class="invent-law-btn" onclick="
-                const url = new URL(window.location);
-                url.searchParams.set('invent_law', 'true');
-                window.location.href = url.toString();
-            ">
-                <span class="icon">⚡</span> INVENT LAW
-            </button>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Check for invent_law URL parameter and trigger action
-        if st.query_params.get("invent_law") == "true":
-            st.session_state.show_invent_law = True
-            # Clear the parameter
-            st.query_params.clear()
-            st.rerun()
-    
-    # INVENT LAW UI (shown when button clicked)
-    if st.session_state.get("show_invent_law", False):
-        with st.expander("⚡ Invent New Law of Thought", expanded=True):
-            goal = st.text_input(
-                "What cognitive process should now exist?",
-                placeholder="e.g. Detect hidden contradictions across decades",
-                key="invent_law_goal"
-            )
-            
-            if goal and st.button("Enact New Law of Thought", key="generate_law"):
-                try:
-                    from src import rag_utils
-                    selected_model = st.session_state.get("selected_model", config.OLLAMA_CHAT_MODEL)
-                    
-                    generation_prompt = f"""
-Goal: {goal}
+        st.caption("")  # spacer — INVENT LAW removed (corpus/ops first)
 
-Create a new process chain in valid YAML format.
-
-Requirements:
-- Name in SCREAMING_SNAKE_CASE
-- 4-6 ruthless steps
-- Each step has: description, prompt, temperature, rag_k
-- No fluff. No explanation. Just the YAML.
-
-Format:
-name: CHAIN_NAME
-description: Brief description
-version: 1.0
-settings:
-  default_temperature: 0.2
-  default_rag_k: 12
-steps:
-  - description: "Step description"
-    prompt: "Step prompt with {{context}} placeholder"
-    temperature: 0.2
-    rag_k: 10
-metadata:
-  created: 2025-01-15
-  author: powercore
-  tags: [cognitive-process]
-"""
-                    
-                    with st.spinner("Generating new law of thought..."):
-                        result = rag_utils.answer_question(
-                            question=generation_prompt,
-                            k=8,
-                            raw_mode=False,
-                            rag_threshold=0.25,
-                            model=selected_model
-                        )
-                        
-                        new_chain_yaml = result.get('response', '')
-                        
-                        # Display generated chain
-                        st.markdown("### Generated Chain:")
-                        st.code(new_chain_yaml, language="yaml")
-                        
-                        # Extract chain name
-                        import re
-                        name_match = re.search(r"name:\s*(\w+)", new_chain_yaml)
-                        if name_match:
-                            chain_name = name_match.group(1)
-                            
-                            # Save button
-                            if st.button("🧠 Make This Law Real", key="save_law"):
-                                chains_dir = Path("prompts/chains")
-                                chains_dir.mkdir(parents=True, exist_ok=True)
-                                
-                                chain_path = chains_dir / f"{chain_name}.yaml"
-                                chain_path.write_text(new_chain_yaml, encoding='utf-8')
-                                
-                                st.success(f"⚡ {chain_name} is now eternal law")
-                                st.session_state.show_invent_law = False
-                                st.rerun()
-                        else:
-                            st.warning("Could not extract chain name from generated YAML")
-                
-                except Exception as e:
-                    st.error(f"Error generating law: {e}")
-                    logger.error(f"Error in INVENT LAW: {e}")
-            
-            # Close button
-            if st.button("Cancel", key="cancel_invent_law"):
-                st.session_state.show_invent_law = False
-                st.rerun()
-    
 
 # Issue 3: Render floating action icons for messages
 def render_message_actions(message_id: str, entry: dict, idx: int):
@@ -3487,8 +3384,39 @@ st.markdown("""
 # Render header (after sidebar and container setup)
 render_header()
 
-if st.session_state.current_page == "chat":
-    # Phase 1: Chat interface as default
+if st.session_state.current_page == "ops":
+    from src.app.ops_home import render_ops_home
+    from scripts.config import LANCE_DB_PATH, INGESTION_LEDGER_PATH
+
+    render_ops_home(
+        api_base=API_BASE,
+        vault=resolve_obsidian_vault_path(),
+        lance_path=LANCE_DB_PATH,
+        ledger_path=INGESTION_LEDGER_PATH,
+        go_to_page=go_to_page,
+    )
+
+elif st.session_state.current_page == "corpus":
+    from src.app.corpus_desk import render_corpus_desk
+    from scripts.config import (
+        INGESTION_LEDGER_PATH,
+        LANCE_DB_PATH,
+        OBSIDIAN_WATCH_DIRS,
+        OBSIDIAN_EXCLUDE_DIRS,
+    )
+
+    render_corpus_desk(
+        vault=resolve_obsidian_vault_path(),
+        inbox=Path(config.INBOX),
+        ledger_path=INGESTION_LEDGER_PATH,
+        watch_dirs=list(OBSIDIAN_WATCH_DIRS),
+        exclude_dirs=list(OBSIDIAN_EXCLUDE_DIRS),
+        lance_path=LANCE_DB_PATH,
+        go_to_page=go_to_page,
+    )
+
+elif st.session_state.current_page == "chat":
+    # Chat interface
     
     # Chat container
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
@@ -3570,6 +3498,9 @@ if st.session_state.current_page == "chat":
                 placeholder="Ask your second brain…",
                 key="main_chat_input"
             )
+            # Ops "Do this next" / recall eval → Chat seed (one-shot)
+            if not question and st.session_state.get("ops_chat_seed"):
+                question = st.session_state.pop("ops_chat_seed")
         
         with right:
             col_crystal, col_copy = st.columns([1, 1])

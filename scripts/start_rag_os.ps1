@@ -67,16 +67,30 @@ Write-Host ""
 
 # Start FastAPI backend
 Write-Host "[4/4] Starting services..." -ForegroundColor Yellow
-Write-Host "  → Starting FastAPI backend on http://127.0.0.1:8000" -ForegroundColor Cyan
+Write-Host "  → Starting FastAPI backend (quiet)…" -ForegroundColor Cyan
 
 # Get the project root directory (parent of scripts folder)
 $projectRoot = (Get-Item $PSScriptRoot).Parent.FullName
 
-# Start backend in new CMD window (cmd /k keeps window open even on error)
-# Use the same approach as batch script for reliability
-$backendCmd = "cd /d `"$projectRoot`" && python -m backend.app"
+# Quiet start: minimized consoles (do not steal focus while typing).
+# Logs: data/logs/backend.log and data/logs/streamlit.log
+$logDir = Join-Path $projectRoot "data\logs"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$backendLog = Join-Path $logDir "backend.log"
+$streamlitLog = Join-Path $logDir "streamlit.log"
 
-Start-Process cmd -ArgumentList "/k", $backendCmd -WindowStyle Normal
+# Prefer 8000; if busy use 8010 and set RAG_API_BASE for Streamlit
+$ragPort = 8000
+try {
+    $busy = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
+    if ($busy) { $ragPort = 8010 }
+} catch { }
+$env:RAG_API_BASE = "http://127.0.0.1:$ragPort"
+Write-Host "  → RAG API port: $ragPort (RAG_API_BASE=$env:RAG_API_BASE)" -ForegroundColor Cyan
+
+$backendCmd = "cd /d `"$projectRoot`" && set RAG_API_BASE=$env:RAG_API_BASE&& .venv-313\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port $ragPort >> `"$backendLog`" 2>&1"
+
+Start-Process cmd -ArgumentList "/c", $backendCmd -WindowStyle Minimized
 
 # Wait for backend to be ready
 Write-Host "  → Waiting for backend to start..." -ForegroundColor Gray
@@ -88,7 +102,7 @@ while ($attempt -lt $maxAttempts -and -not $backendReady) {
     Start-Sleep -Seconds 1
     $attempt++
     try {
-        $healthCheck = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -TimeoutSec 1 -ErrorAction Stop
+        $healthCheck = Invoke-WebRequest -Uri "http://127.0.0.1:$ragPort/health" -TimeoutSec 1 -ErrorAction Stop
         if ($healthCheck.StatusCode -eq 200) {
             $backendReady = $true
             Write-Host "  ✓ Backend is ready!" -ForegroundColor Green
@@ -105,53 +119,43 @@ if (-not $backendReady) {
     Write-Host "  ⚠ Backend did not respond in time, but continuing..." -ForegroundColor Yellow
 }
 
-# Notes watcher is now controlled exclusively via Streamlit Settings tab
-# This prevents conflicts between auto-start and manual start
-# Write-Host "  → Starting notes watcher..." -ForegroundColor Cyan
-# try {
-#     $notesWatcherCmd = "cd /d `"$projectRoot`" && python scripts/notes_watcher.py"
-#     Start-Process cmd -ArgumentList "/k", $notesWatcherCmd -WindowStyle Minimized
-#     Write-Host "  ✓ Notes watcher started (minimized window)" -ForegroundColor Green
-# } catch {
-#     Write-Host "  ⚠ Failed to start notes watcher: $_" -ForegroundColor Yellow
-#     Write-Host "     You can start it manually via Streamlit Settings tab" -ForegroundColor Gray
-# }
-Write-Host "  ℹ Notes watcher: Start via Streamlit Settings → Obsidian Sync" -ForegroundColor Gray
+# Quiet notes watcher on by default — new vault captures hit Lance without a scavenger hunt
+Write-Host "  → Starting notes watcher (quiet, via API)..." -ForegroundColor Cyan
+try {
+    $watchUrl = "$($env:RAG_API_BASE)/ingest/watch/notes/start"
+    $watchResp = Invoke-WebRequest -Uri $watchUrl -Method POST -TimeoutSec 8 -ErrorAction Stop
+    Write-Host "  ✓ Notes watcher started (new .md → Lance)" -ForegroundColor Green
+} catch {
+    Write-Host "  ⚠ Notes watcher API start failed: $_" -ForegroundColor Yellow
+    Write-Host "     Ops home → Start watcher, or Settings → Obsidian Sync" -ForegroundColor Gray
+}
 
-# Start Streamlit
-Write-Host "  → Starting Streamlit app on http://127.0.0.1:8501" -ForegroundColor Cyan
+# Start Streamlit (minimized — Ops home is the landing page)
+Write-Host "  → Starting Streamlit app on http://127.0.0.1:8501 (minimized)" -ForegroundColor Cyan
 
-$streamlitCmd = "cd /d `"$projectRoot`" && streamlit run src/app/streamlit_app.py --server.port=8501 --server.address=127.0.0.1"
+$streamlitCmd = "cd /d `"$projectRoot`" && set RAG_API_BASE=$env:RAG_API_BASE&& .venv-313\Scripts\python.exe -m streamlit run src/app/streamlit_app.py --server.headless true --server.port=8501 --server.address=127.0.0.1 >> `"$streamlitLog`" 2>&1"
 
-Start-Process cmd -ArgumentList "/k", $streamlitCmd -WindowStyle Normal
+Start-Process cmd -ArgumentList "/c", $streamlitCmd -WindowStyle Minimized
 
 # Wait a moment for Streamlit to start
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 4
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  Services Started!" -ForegroundColor Green
+Write-Host "  Services Started (quiet)!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Backend API:  http://127.0.0.1:8000" -ForegroundColor White
-Write-Host "  API Docs:     http://127.0.0.1:8000/docs" -ForegroundColor White
-Write-Host "  Streamlit UI: http://127.0.0.1:8501" -ForegroundColor White
+Write-Host "  Backend API:  http://127.0.0.1:$ragPort" -ForegroundColor White
+Write-Host "  API Docs:     http://127.0.0.1:$ragPort/docs" -ForegroundColor White
+Write-Host "  Streamlit UI: http://127.0.0.1:8501  (Ops home)" -ForegroundColor White
+Write-Host "  Notes watch:  on by default (new .md → Lance)" -ForegroundColor White
+Write-Host "  Logs:         $logDir" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  Press any key to open Streamlit in browser..." -ForegroundColor Gray
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+Write-Host "  Consoles are minimized on purpose so they do not steal focus." -ForegroundColor Gray
+Write-Host "  Stop services from Task Manager (python/streamlit) or close minimized cmds." -ForegroundColor Gray
+Write-Host ""
 
-# Open browser
 Start-Process "http://127.0.0.1:8501"
-
-Write-Host ""
-Write-Host "  ✓ Browser opened!" -ForegroundColor Green
-Write-Host ""
-Write-Host "  Note: Services are running in separate CMD windows." -ForegroundColor Gray
-Write-Host "        You should see two new windows:" -ForegroundColor Gray
-Write-Host "        - 'RAG OS Backend' (FastAPI)" -ForegroundColor Gray
-Write-Host "        - 'RAG OS Streamlit' (Streamlit UI)" -ForegroundColor Gray
-Write-Host "        Close those windows to stop the services." -ForegroundColor Gray
-Write-Host ""
-Write-Host "  If windows don't appear, check Task Manager for python.exe processes." -ForegroundColor Yellow
+Write-Host "  ✓ Browser opened at Ops home." -ForegroundColor Green
 Write-Host ""
 

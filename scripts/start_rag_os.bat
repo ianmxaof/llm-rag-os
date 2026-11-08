@@ -76,10 +76,11 @@ if %errorlevel% equ 0 (
 )
 echo.
 
-REM Start FastAPI backend
-echo [5/6] Starting FastAPI backend...
+REM Quiet start: minimized windows + logs under data\logs (no focus steal)
+if not exist "data\logs" mkdir data\logs
+echo [5/6] Starting FastAPI backend (minimized)...
 echo   Starting on http://127.0.0.1:8000
-start "Powercore Backend" cmd /k "cd /d %~dp0.. && .venv-313\Scripts\activate && uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000"
+start "Powercore Backend" /MIN cmd /c "cd /d %~dp0.. && .venv-313\Scripts\activate && uvicorn backend.app:app --host 127.0.0.1 --port 8000 >> data\logs\backend.log 2>&1"
 
 REM Wait for backend to start with retry logic
 echo   Waiting for backend to start...
@@ -105,34 +106,38 @@ goto check_backend
 :backend_ready
 echo.
 
-REM Start Streamlit
-echo [6/6] Starting Streamlit app...
+REM Quiet notes watcher on by default (new captures → Lance)
+echo   Starting notes watcher via API...
+curl -sS -X POST http://127.0.0.1:8000/ingest/watch/notes/start >nul 2>&1
+if %errorlevel% equ 0 (
+    echo   [OK] Notes watcher started
+) else (
+    echo   [WARN] Watcher API start failed — use Ops → Start watcher
+)
+echo.
+
+REM Start Streamlit minimized — Ops home is the landing page
+echo [6/6] Starting Streamlit app (minimized)...
 echo   Starting on http://127.0.0.1:8501
-start "Powercore RAG" /MAX cmd /k "cd /d %~dp0.. && .venv-313\Scripts\activate && streamlit run src/app/streamlit_app.py --server.headless true --server.maxMessageSize=0 --server.port=8501 --server.address=127.0.0.1"
+start "Powercore RAG" /MIN cmd /c "cd /d %~dp0.. && .venv-313\Scripts\activate && streamlit run src/app/streamlit_app.py --server.headless true --server.maxMessageSize=0 --server.port=8501 --server.address=127.0.0.1 >> data\logs\streamlit.log 2>&1"
 
 REM Wait for Streamlit to start
-timeout /t 3 /nobreak >nul
+timeout /t 4 /nobreak >nul
 
 echo.
 echo ╔═══════════════════════════════════════════════════════════╗
-echo ║           POWERCORE RAG IS NOW FULLY ALIVE                ║
-echo ║   Ollama     → running                                    ║
+echo ║     POWERCORE RAG — quiet start (Ops home)                ║
+echo ║   Ollama     → running (if found)                         ║
 echo ║   Backend    → http://127.0.0.1:8000                       ║
-echo ║   Dashboard  → http://localhost:8501                      ║
+echo ║   Dashboard  → http://127.0.0.1:8501  (Ops)                ║
+echo ║   Logs       → data\logs\                                 ║
 echo ╚═══════════════════════════════════════════════════════════╝
 echo.
-echo   Backend API:  http://127.0.0.1:8000
-echo   API Docs:     http://127.0.0.1:8000/docs
-echo   Streamlit UI: http://127.0.0.1:8501
-echo.
-echo   Opening Streamlit in browser...
+echo   Consoles are minimized on purpose (no focus steal while typing).
+echo   Opening Ops home in browser...
 start http://127.0.0.1:8501
 
 echo.
 echo   [OK] Browser opened!
 echo.
-echo   Note: Services are running in separate windows.
-echo         Close those windows to stop the services.
-echo.
-pause
 

@@ -1,0 +1,331 @@
+/**
+ * PowerCore Chrome — Streamlit shell (near-black).
+ * Tokens mirrored from powercore-ops/design/powercore-chrome.tokens.css — keep in sync.
+ * Second brain / Ops UI → powercore.app research desk family.
+ */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=DM+Sans:wght@400;500;600&display=swap");
+
+:root {
+  --pc-bg: #0a0a0b;
+  --pc-bg-elevated: #121214;
+  --pc-bg-overlay: #1a1a1e;
+  --pc-chrome: #2a2a30;
+  --pc-chrome-strong: #3d3d46;
+  --pc-fg: #f4f4f5;
+  --pc-fg-muted: #a1a1aa;
+  --pc-fg-subtle: #71717a;
+  --pc-accent-cyan: #22d3ee;
+  --pc-accent-violet: #a78bfa;
+  --pc-accent-amber: #fbbf24;
+  --pc-accent-rose: #fb7185;
+  --pc-accent-emerald: #34d399;
+  --pc-accent-focus: var(--pc-accent-cyan);
+  --pc-ok: var(--pc-accent-emerald);
+  --pc-warn: var(--pc-accent-amber);
+  --pc-danger: var(--pc-accent-rose);
+  --pc-info: var(--pc-accent-cyan);
+  --pc-radius: 8px;
+  --pc-radius-panel: 10px;
+  --pc-border: 1px solid var(--pc-chrome);
+  --pc-font-ui: "Inter", "DM Sans", "Roboto", system-ui, sans-serif;
+  --pc-font-mono: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+  --pc-font-size-md: 13px;
+  --pc-line-tight: 1.25;
+  --pc-scroll-track: #1a1a1e;
+  --pc-scroll-thumb: #3f3f46;
+  --pc-scroll-thumb-hover: #52525b;
+  --pc-scroll-width: 8px;
+  --pc-menu-hover: #1a1f35;
+}
+
+html, body, .stApp, [data-testid="stAppViewContainer"] {
+  background:
+    radial-gradient(ellipse 90% 60% at 80% -20%, color-mix(in srgb, #22d3ee 14%, transparent) 0%, transparent 50%),
+    radial-gradient(ellipse 60% 40% at 0% 100%, color-mix(in srgb, #a78bfa 11%, transparent) 0%, transparent 45%),
+    var(--pc-bg) !important;
+  color: var(--pc-fg) !important;
+  font-family: var(--pc-font-ui) !important;
+  font-size: var(--pc-font-size-md) !important;
+}
+
+[data-testid="stHeader"],
+[data-testid="stToolbar"] {
+  background: var(--pc-bg) !important;
+}
+
+.main .block-container {
+  background: transparent !important;
+  color: var(--pc-fg) !important;
+}
+
+section[data-testid="stSidebar"] {
+  background: var(--pc-bg) !important;
+  border-right: 1px solid var(--pc-chrome) !important;
+  font-family: var(--pc-font-ui) !important;
+}
+
+section[data-testid="stSidebar"] * {
+  font-family: var(--pc-font-ui) !important;
+}
+
+.secondary-sidebar {
+  background: var(--pc-bg-elevated) !important;
+  border-right: 1px solid var(--pc-chrome) !important;
+}
+
+/* Kill purple Grok accents → cyan focus */
+button[kind="primary"],
+.invent-law-btn,
+div[data-testid="stButton"] > button[kind="primary"] {
+  background: var(--pc-bg-overlay) !important;
+  color: var(--pc-fg) !important;
+  border: 1px solid var(--pc-chrome) !important;
+  border-radius: var(--pc-radius) !important;
+  box-shadow: none !important;
+  font-family: var(--pc-font-ui) !important;
+}
+
+button[kind="primary"]:hover,
+div[data-testid="stButton"] > button[kind="primary"]:hover {
+  border-color: var(--pc-accent-focus) !important;
+  color: var(--pc-accent-focus) !important;
+}
+
+div[data-testid="stButton"] > button {
+  background: var(--pc-bg-elevated) !important;
+  color: var(--pc-fg) !important;
+  border: 1px solid var(--pc-chrome) !important;
+  border-radius: var(--pc-radius) !important;
+  font-family: var(--pc-font-ui) !important;
+}
+
+div[data-testid="stButton"] > button:hover {
+  background: var(--pc-menu-hover) !important;
+  border-color: var(--pc-accent-focus) !important;
+  color: var(--pc-accent-focus) !important;
+}
+
+section[data-testid="stSidebar"] button[kind="secondary"][data-active="true"],
+section[data-testid="stSidebar"] button[data-active="true"] {
+  background: var(--pc-bg-overlay) !important;
+  color: var(--pc-accent-focus) !important;
+  border: 1px solid var(--pc-chrome) !important;
+  font-weight: 600 !important;
+}
+
+.stSlider > div > div > div > div {
+  background: var(--pc-chrome) !important;
+}
+
+.stSlider > div > div > div > div > div {
+  background: var(--pc-accent-focus) !important;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--pc-accent-cyan) 35%, transparent) !important;
+}
+
+.message-user {
+  background: var(--pc-bg-overlay) !important;
+  border: 1px solid var(--pc-chrome) !important;
+  color: var(--pc-fg) !important;
+}
+
+.message-assistant {
+  background: var(--pc-bg-elevated) !important;
+  border: 1px solid var(--pc-chrome) !important;
+  color: var(--pc-fg) !important;
+}
+
+.message-divider {
+  border-top: 1px solid var(--pc-chrome) !important;
+}
+
+.header-logo-centered {
+  font-family: var(--pc-font-ui) !important;
+  color: var(--pc-fg) !important;
+  letter-spacing: 0.02em;
+}
+
+.header-logo-centered .pc-suite-badge {
+  display: inline-block;
+  margin-left: 8px;
+  vertical-align: middle;
+  background: color-mix(in srgb, var(--pc-accent-violet) 18%, var(--pc-bg-elevated));
+  color: var(--pc-accent-violet);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: var(--pc-radius);
+}
+
+.pc-ops-panel {
+  background: var(--pc-bg-elevated);
+  border: var(--pc-border);
+  border-radius: var(--pc-radius-panel);
+  padding: 12px 14px;
+  margin: 8px 0;
+}
+
+.pc-ops-kicker {
+  color: var(--pc-fg-subtle);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+
+.note-link {
+  color: var(--pc-accent-cyan) !important;
+  border-bottom: 1px dashed color-mix(in srgb, var(--pc-accent-cyan) 45%, transparent) !important;
+}
+
+.note-link:hover {
+  background: color-mix(in srgb, var(--pc-accent-cyan) 10%, transparent) !important;
+  border-bottom: 1px solid var(--pc-accent-cyan) !important;
+}
+
+.rag-chunk {
+  background: var(--pc-bg-elevated) !important;
+  border: 1px solid var(--pc-chrome) !important;
+  border-radius: var(--pc-radius) !important;
+}
+
+.rag-chunk:hover {
+  border-color: var(--pc-accent-focus) !important;
+}
+
+.relevance-high {
+  background: color-mix(in srgb, var(--pc-ok) 20%, transparent) !important;
+  color: var(--pc-ok) !important;
+}
+
+.relevance-medium {
+  background: color-mix(in srgb, var(--pc-warn) 20%, transparent) !important;
+  color: var(--pc-warn) !important;
+}
+
+.relevance-low {
+  background: color-mix(in srgb, var(--pc-danger) 20%, transparent) !important;
+  color: var(--pc-danger) !important;
+}
+
+div[data-testid="stExpander"] {
+  background: var(--pc-bg-elevated) !important;
+  border: 1px solid var(--pc-chrome) !important;
+  border-radius: var(--pc-radius-panel) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+div[data-baseweb="input"] input,
+div[data-baseweb="textarea"] textarea,
+div[data-baseweb="select"] > div {
+  background: var(--pc-bg-elevated) !important;
+  color: var(--pc-fg) !important;
+  font-family: var(--pc-font-ui) !important;
+}
+
+div[data-baseweb="input"],
+div[data-baseweb="textarea"],
+div[data-baseweb="select"] > div {
+  border-color: var(--pc-chrome) !important;
+  border-radius: var(--pc-radius) !important;
+}
+
+div[data-baseweb="input"]:focus-within,
+div[data-baseweb="textarea"]:focus-within {
+  border-color: var(--pc-accent-focus) !important;
+  box-shadow: 0 0 0 1px var(--pc-accent-focus) !important;
+}
+
+/* Metrics / captions */
+[data-testid="stMetricValue"] {
+  color: var(--pc-fg) !important;
+  font-family: var(--pc-font-ui) !important;
+}
+
+[data-testid="stMetricLabel"] {
+  color: var(--pc-fg-muted) !important;
+}
+
+.stCaption, [data-testid="stCaptionContainer"] {
+  color: var(--pc-fg-muted) !important;
+}
+
+/* Thin dark scrollbars */
+*::-webkit-scrollbar {
+  width: var(--pc-scroll-width);
+  height: var(--pc-scroll-width);
+}
+*::-webkit-scrollbar-track {
+  background: var(--pc-scroll-track);
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--pc-scroll-thumb);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--pc-scroll-thumb-hover);
+}
+.stApp {
+  scrollbar-width: thin;
+  scrollbar-color: var(--pc-scroll-thumb) var(--pc-scroll-track);
+}
+
+code, pre, .stCode {
+  font-family: var(--pc-font-mono) !important;
+}
+
+/* ---- powercore-app transfer (ACK 2026-10-28) ----
+ * Source: powercore-ops/docs/aesthetic-research/powercore-app/transfer-proposed.css
+ * Dual washes, solid cyan primary CTA, accent ops panels.
+ */
+:root {
+  --pc-wash-cyan: color-mix(in srgb, var(--pc-accent-cyan) 18%, transparent);
+  --pc-wash-violet: color-mix(in srgb, var(--pc-accent-violet) 14%, transparent);
+  --pc-accent-border: color-mix(in srgb, var(--pc-accent-cyan) 35%, var(--pc-chrome));
+  --pc-cta-fg-on-accent: #0a0a0b;
+  --pc-glow-cyan: rgba(34, 211, 238, 0.15);
+  --pc-radius-hero: 16px;
+}
+
+html,
+body,
+.stApp,
+[data-testid="stAppViewContainer"] {
+  background:
+    radial-gradient(ellipse 90% 60% at 80% -20%, var(--pc-wash-cyan) 0%, transparent 50%),
+    radial-gradient(ellipse 60% 40% at 0% 100%, var(--pc-wash-violet) 0%, transparent 45%),
+    var(--pc-bg) !important;
+}
+
+button[kind="primary"],
+.invent-law-btn,
+div[data-testid="stButton"] > button[kind="primary"] {
+  background: var(--pc-accent-cyan) !important;
+  border-color: #67e8f9 !important;
+  color: var(--pc-cta-fg-on-accent) !important;
+  font-weight: 600 !important;
+}
+
+button[kind="primary"]:hover,
+div[data-testid="stButton"] > button[kind="primary"]:hover {
+  filter: brightness(1.06);
+  border-color: #a5f3fc !important;
+  color: var(--pc-cta-fg-on-accent) !important;
+}
+
+.pc-ops-panel {
+  border: 1px solid var(--pc-accent-border);
+  border-radius: var(--pc-radius-panel);
+  background:
+    linear-gradient(120deg, color-mix(in srgb, var(--pc-accent-cyan) 10%, transparent), transparent 42%),
+    linear-gradient(300deg, color-mix(in srgb, var(--pc-accent-violet) 8%, transparent), transparent 50%),
+    var(--pc-bg-elevated);
+  box-shadow: 0 0 24px var(--pc-glow-cyan);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button[kind="primary"],
+  div[data-testid="stButton"] > button[kind="primary"] {
+    transition: none !important;
+  }
+}
